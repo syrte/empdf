@@ -257,35 +257,41 @@ class KDE:
             return self.pdf(self.data_scaled[:self.n], scaled=True)
 
 
-class Potential:
+class L2maxMapper:
     N_GRID = 1001
 
     def __init__(self, rmin, rmax, pot):
+        """
+        pot: potential object with callable '.potential' and (optional) '.mass'
+        """
         r_cir = np.linspace(rmin, rmax, self.N_GRID)
-        m_cir = self.pot.mass(r_cir)
-        U_cir = self.pot.potential(r_cir)
+        U_cir = pot.potential(r_cir)
+        if hasattr(pot, 'mass'):
+            m_cir = pot.mass(r_cir)
+        else:
+            m_cir = CubicSpline(r_cir, U_cir).derivative()(r_cir) * r_cir**2 / G
+            # dU/dr=GM/r^2 => M = r^2 dU/dr / G
 
         E_cir = 0.5 * G * m_cir / r_cir + U_cir
         L2_cir = G * m_cir * r_cir
 
-        self.rmin = rmin
-        self.rmax = rmax
-        self.r_cir = r_cir
-        self.E_cir = E_cir
-        self.U_cir = U_cir
-        self.L2_cir = L2_cir
+        interp_lnL2_cir = CubicSpline(E_cir, np.log(L2_cir), extrapolate=False)
+        interp_lnr_cir = CubicSpline(E_cir, np.log(r_cir), extrapolate=False)
+
+        self.__dict__.update(locals())
+        del self.self
 
     def L2_max(self, E, return_r=False):
-        L2_max = interp_logy(E, self.E_cir, self.L2_cir)
+        L2_max = np.exp(self.interp_lnL2_cir(E))
 
-        ix1 = E < self.E_cir[0]
-        L2_max[ix1] = 2 * self.rmin**2 * (E[ix1] - self.U_cir[0])
+        ix1 = E <= self.E_cir[0]
+        L2_max[ix1] = self.rmin**2 * 2 * (E[ix1] - self.U_cir[0])
 
-        ix2 = E > self.E_cir[-1]
-        L2_max[ix2] = 2 * self.rmax**2 * (E[ix2] - self.U_cir[-1])
+        ix2 = E >= self.E_cir[-1]
+        L2_max[ix2] = self.rmax**2 * 2 * (E[ix2] - self.U_cir[-1])
 
         if return_r:
-            r = interp_logy(E, self.E_cir, self.r_cir)
+            r = np.exp(self.interp_lnr_cir(E))
             r[ix1] = self.rmin
             r[ix2] = self.rmax
             return L2_max, r
@@ -303,13 +309,13 @@ class DFInterpolator:
     x2 = 0.5 * x2 + 0.5  # x2 in [0, 1]
     w2 = 0.5 * w2
 
-    def __init__(self, Emin, Emax, rmin, rmax, N_EBIN, N_JBIN, pot, N_Ej2_interp, integrator):
+    def __init__(self, Emin, Emax, rmin, rmax, N_EBIN, N_JBIN, L2mapper, N_Ej2_interp, integrator):
         E = np.linspace(Emin, Emax, N_EBIN)
         j2 = np.linspace(0, 1, N_JBIN)
         E2d, j22d = np.meshgrid(E, j2, sparse=True, indexing='ij')
 
-        r_pin = pot.r_pin(E2d)
-        L2_max = pot.L2_max(E2d)
+        r_pin = L2mapper.r_pin(E2d)
+        L2_max = L2mapper.L2_max(E2d)
         L2 = L2_max * j2
 
         parr = np.zeros((N_EBIN, N_JBIN), dtype=Particle_dtype)
@@ -330,13 +336,13 @@ class DFInterpolator:
         self.Tr = EqualGridInterpolator(E, j2, Tr)
 
     def f_E_L2(self, E, L2):
-        L2_max = self.pot.L2_max(E)
+        L2_max = self.L2mapper.L2_max(E)
         j2 = L2 / L2_max
         return self.f_E_j2(E, j2)
 
     def prepare_pdf(self):
         r = np.linspace(self.rmin, self.rmax, self.N_RBIN)
-        U = self.pot(r)
+        U = self.L2mapper(r)
         vmax = (2 * (self.E_max - U))**0.5
 
         v = 0.5 * vmax * self.x1 + 0.5 * vmax
