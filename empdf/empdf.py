@@ -12,7 +12,7 @@ from oPDF import oPDF
 from handy import EqualGridInterpolator
 from scipy.interpolate import CubicSpline
 from scipy.special import roots_legendre
-from scipy.stats import gaussian_kde
+from itertools import product as iter_product
 
 # -----------------------------------------------
 import cyper
@@ -38,12 +38,15 @@ G = 43007.1
 
 
 def decompose_r_v(r, v):
+    """
+    r, v: shape (n, 3)
+    """
     rr = np.sqrt((r**2).sum(-1))
-    vvsq = (v**2).sum(-1)
-    vv = np.sqrt(vvsq)
+    vv2 = (v**2).sum(-1)
+    vv = np.sqrt(vv2)
     vr = (v * r).sum(-1) / rr
-    vrsq = np.fmin(vr**2, vvsq)
-    vt = np.sqrt(vvsq - vrsq)
+    vr2 = np.fmin(vr**2, vv2)
+    vt = np.sqrt(vv2 - vr2)
     return rr, vv, vr, vt
 
 
@@ -60,82 +63,198 @@ def interp_loglog(x, xp, yp):
     return np.exp(CubicSpline(np.log(xp), np.log(yp))(np.log(x)))
 
 
-def compute_neff(weights):
-    return weights.sum()**2 / (weights**2).sum()
+# -----------------------------------------------
+def compute_neff(weights, normed=False):
+    if normed:
+        return 1 / np.sum(weights**2)
+    else:
+        return np.sum(weights)**2 / np.sum(weights**2)
+
+
+def scotts_factor(neff, d):
+    """
+    Scott's rule of thumb, adopted as default in scipy.stats.gaussian_kde
+
+    neff: 
+        Effective number of data points
+    d: 
+        Number of dimensions
+
+    See Scott 2015, "Multivariate Density Estimation: Theory, Practice, and Visualization"
+    """
+    return neff**(-1. / (d + 4))
 
 
 def MADN(x):
     """
-    the normalized median absolute deviation (MADN),
-    a robust measure of scale that is more robust than IQR
+    The normalized median absolute deviation (MADN),
+    a robust measure of scale that is more robust than IQR.
+    See https://en.wikipedia.org/wiki/Robust_measures_of_scale
 
-    see https://en.wikipedia.org/wiki/Robust_measures_of_scale
+    shape (n,) --> scalar
+    shape (n, d) --> shape (d,)
     """
-    return np.median(np.abs(x - np.median(x))) * 1.4826
+    return np.median(np.abs(x - np.median(x, axis=0)), axis=0) * 1.4826
 
 
-class KDE2D:
+def boundary_reflex(x, boundary=None, c_contiguous=False):
+    """
+    Parameters
+    ----------
+    x: shape(n, d)
+    boundary: None or shape (d, 2)
+    c_contiguous:
+        Make no difference for building KDTree and queries.
+
+    Returns
+    -------
+    out: shape(m*n, d)
+        m is the number of combinations: m = prod_i (len(boundary[i]) + 1)
+        out always satisfies out[:n] == x
+
+    Examples
+    --------
+    n = 1000
+    x = np.random.rand(n, 3)
+    a = boundary_reflex(x, [[0, 1], [0], None])  # bounds: [0, 1]x[0, inf]x[-inf, inf]
+    assert a.shape == (6*n, 3)
+    assert np.array_equal(a[:n], x)
+    plt.scatter(x.T[0], x.T[1])
+    plt.scatter(a.T[0], a.T[1], s=5)
+    """
+    n, d = x.shape
+    if boundary is None:
+        out = x
+    else:
+        arr_list = [[] for i in range(d)]
+        for i in range(d):
+            xi = x[:, i]
+            arr_list[i].append(xi)  # original
+            if boundary[i] is None:
+                continue
+            else:
+                for bound in boundary[i]:
+                    if bound is None:
+                        continue
+                    else:
+                        arr_list[i].append(2 * bound - xi)  # reflected
+        arr_join = np.array(list(iter_product(*arr_list)))  # shape (m, d, n)
+        out = arr_join.transpose(0, 2, 1).reshape(-1, d)  # correct shape (m*n, d)
+
+    if c_contiguous:
+        out = np.ascontiguousarray(out)
+    return out
+
+
+# See Table 6.2, Scott 2015
+# and https://scikit-learn.org/stable/modules/density.html
+kernel_var_dict = dict(
+    tophat=1 / 3,
+    linear=1 / 6,
+    epanechnikov=1 / 5,
+    normal=1,
+    cosine=1 - 8 / np.pi**2
+)
+
+
+class KDE:
     N_BIN_FFT = 100
 
-    def __init__(self, xp, yp, weights=None, backend='sklearn', bw=None, **args):
+    def __init__(self, data, weights=None, boundary=None,
+                 backend='sklearn', bw_factor=1, kernel='epanechnikov', **options):
         """
-        backend:
-            'scipy', 'sklearn', 'KDEpy.FFTKDE', 'KDEpy.TreeKDE'
-        args:
-            sklearn: kernel=epanechnikov
+        data: shape (n, d)
+        weights: shape (n,)
+        boundary: None or shape (d, 2)
+        backend: ['scipy', 'sklearn', 'KDEpy.FFTKDE', 'KDEpy.TreeKDE']
+        bw_factor:
+            bandwidth = Scott's rule * bw_factor
+        options:
+            sklearn: kernel='epanechnikov'
+
+        data = np.stack([E, j2], axis=-1)
+        kde = KDE2D(data, weights=w, boundary=[[Emin, None], [0, 1]],
+                    backend='sklearn', kernel='epanechnikov')
         """
-        self.backend = backend
+        n, d = data.shape
 
-        if self.backend != 'scipy':
-            xscale, yscale = MADN(xp), MADN(yp)
-            xp = xp / xscale
-            yp = yp / yscale
-            xy = np.stack([xp, yp], axis=-1)
+        # calculate neff before reflex
+        if weights is None:
+            neff = n
+        else:
+            assert weights.shape == (n,), "incorrect `weights` shape!"
+            weights = weights / np.sum(weights)
+            neff = compute_neff(weights, normed=True)
+        bandwidth = scotts_factor(neff, d=d) * bw_factor
 
-            self.scale = xscale, yscale
-            self.pdf_scale = xscale * yscale
-            self.xy = xy
+        # reflect to reduce bias at boundary
+        if boundary is not None:
+            assert len(boundary) == d, "incorrect `boundary` shape!"
+            data = boundary_reflex(data, boundary=boundary)
+            nrep = len(data) // n  # number of duplicates
 
-        if self.backend == 'scipy':
+            if weights is not None:
+                weights = np.tile(weights, nrep)  # duplicate weights as well
+        else:
+            nrep = 1
+
+        # calculate scale; scipy has its own scale
+        if backend != 'scipy':
+            # use the original n points for scale
+            scale = MADN(data[:n])
+            pdf_scale = np.prod(scale)
+            data_scaled = data / scale
+
+        # initialize KDE estimator
+        if backend == 'scipy':
             from scipy.stats import gaussian_kde
-            self.kde = gaussian_kde((xp, yp), weights=weights, **args)
+
+            # initialize with the original n points for covariance matrix
+            # this modified kde object is only designed for calling kde.pdf and kde.logpdf
+            kde = gaussian_kde(data[:n].T, weights=weights[:n], bw_method=bandwidth)
+            kde.dataset = data.T
+            kde.n = len(data)
+            if weights is None:
+                kde._weights = np.ones(kde.n) / kde.n
+            else:
+                kde._weights = weights / nrep  # normalized to 1
+
+        if backend == 'sklearn':
+            from sklearn.neighbors import KernelDensity
+
+            options.setdefault('rtol', 1e-6)
+            bw_normed = bandwidth / kernel_var_dict[kernel]**0.5  # normalize kernels to var = 1
+            kde = KernelDensity(kernel=kernel, bandwidth=bw_normed, **options)
+            kde.fit(data_scaled, sample_weight=weights)
+
+        elif backend == 'KDEpy.FFTKDE' or backend == 'KDEpy.TreeKDE':
+            raise NotImplementedError
+
+        ldict = locals()
+        for key in ['kde', 'data', 'weights', 'boundary', 'backend', 'n', 'nrep',
+                    'scale', 'pdf_scale', 'data_scaled', 'bandwidth']:
+            if key in ldict:
+                setattr(self, key, ldict[key])
+
+    def pdf(self, data, scaled=False):
+        if self.backend == 'scipy':
+            return self.nrep * self.kde.pdf(data.T)
 
         elif self.backend == 'sklearn':
-            from sklearn.neighbors import KernelDensity
-            args = {**dict(kernel='gaussian', rtol=1e-5), **args}
-            self.kde = KernelDensity(bandwidth=bw, **args).fit(xy)
+            if scaled:
+                lnp = self.kde.score_samples(data)
+            else:
+                lnp = self.kde.score_samples(data / self.scale)
+            return self.nrep / self.pdf_scale * np.exp(lnp)
 
-        elif self.backend == 'KDEpy.FFTKDE':
-            from KDEpy import FFTKDE
-            bin, dens = FFTKDE(bw=bw, kernel='epa').fit(xy).evaluate(self.NBIN_FFT)
-            self.kde = EqualGridInterpolator(bin, dens/self.pdf_scale)
-
-        elif self.backend == 'KDEpy.TreeKDE':
-            from KDEpy import TreeKDE
-            bin, dens = TreeKDE(bw=bw, kernel='epa').fit(xy).evaluate(self.NBIN_FFT)
-            self.kde = EqualGridInterpolator(bin, dens/self.pdf_scale)
-
-        self.xp = xp
-        self.yp = yp
+        else:
+            raise NotImplementedError
 
     def autopdf(self):
-        return self.pdf(self.xy, scaled=True)
-
-    def pdf(self, x, y=None, scaled=False):
-        if not scaled and self.backend != 'scipy':
-            xscale, yscale = self.scale
-            x = x / xscale
-            y = y / yscale
-
         if self.backend == 'scipy':
-            return self.kde((x, y))
-
-        elif self.backend == 'sklearn':
-            if y is None:
-                xy = x
-            else:
-                xy = np.stack([x, y], axis=-1)
-            return np.exp(self.kde.score_samples(xy))/self.pdf_scale
+            return self.pdf(self.data[:self.n])
+        else:
+            return self.pdf(self.data_scaled[:self.n], scaled=True)
 
 
 class Potential:
@@ -325,7 +444,7 @@ class Estimator:
 
         T = tracer.data['Tr']
         if self.obs_correct:
-            w = tracer.data['Tr']/tracer.data['Tr_obs']
+            w = tracer.data['Tr'] / tracer.data['Tr_obs']
 
         self.U = U
         self.E = E
@@ -339,7 +458,6 @@ class Estimator:
 
         self.data_orb = res
 
-
         # preparing points
         # ----------------------------
         x, y, w = E, j2, wi
@@ -347,10 +465,8 @@ class Estimator:
         yy = np.concatenate([y, 2 - y, -y])  # to make a symmetric boundary
         ww = np.concatenate([w, w, w])
 
-
     def _make_orbit_grid(self, ):
         Emin, Emax = self.E.min(), self.E.max()
-
 
     def lnp_emdf(self, param=None):
         if param is not None:
