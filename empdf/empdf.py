@@ -13,6 +13,8 @@ from handy import EqualGridInterpolator
 from scipy.interpolate import CubicSpline
 from scipy.special import roots_legendre
 
+from .kde import KDE
+
 # -----------------------------------------------
 import cyper
 import cython_gsl
@@ -29,24 +31,10 @@ pyx = cyper.inline(
 )
 Integrator = pyx.Integrator
 Particle_dtype = pyx.Particle_dtype
+
+
 # -----------------------------------------------
-
-
 G = 43007.1
-# -----------------------------------------------
-
-
-def decompose_r_v(r, v):
-    """
-    r, v: shape (n, 3)
-    """
-    rr = np.sqrt((r**2).sum(-1))
-    vv2 = (v**2).sum(-1)
-    vv = np.sqrt(vv2)
-    vr = (v * r).sum(-1) / rr
-    vr2 = np.fmin(vr**2, vv2)
-    vt = np.sqrt(vv2 - vr2)
-    return rr, vv, vr, vt
 
 
 # -----------------------------------------------
@@ -63,9 +51,20 @@ def decompose_r_v(r, v):
 
 
 # -----------------------------------------------
+def decompose_r_v(r, v):
+    """
+    r, v: shape (n, 3)
+    """
+    rr = np.sqrt((r**2).sum(-1))
+    vv2 = (v**2).sum(-1)
+    vv = np.sqrt(vv2)
+    vr = (v * r).sum(-1) / rr
+    vr2 = np.fmin(vr**2, vv2)
+    vt = np.sqrt(vv2 - vr2)
+    return rr, vv, vr, vt
+
 
 # -----------------------------------------------
-
 class L2maxMapper:
     N_GRID = 1001
 
@@ -75,6 +74,7 @@ class L2maxMapper:
         """
         r_cir = np.linspace(rmin, rmax, self.N_GRID)
         U_cir = pot.potential(r_cir)
+
         if hasattr(pot, 'mass'):
             m_cir = pot.mass(r_cir)
         else:
@@ -186,6 +186,58 @@ class DFInterpolator:
         self.cdf_r = CubicSpline(r, p_r * r**2).antiderivative(1)
 
 
+class Tracer:
+    def __init__(self, r, v, rmin=None, rmax=None, rmin_obs=None, rmax_obs=None):
+        ntracer = len(r)
+        rr, vv, vr, vt = decompose_r_v(self.r, self.v)
+        K = 0.5 * vv**2
+        L = vr * rr
+        L2 = L**2
+
+        if rmin is None:
+            rmin = rr.min()
+        else:
+            assert rmin <= rr.min(), "rmin <= min{|r|} is expected."
+        if rmax is None:
+            rmax = rr.max()
+        else:
+            assert rmax >= rr.max(), "rmax <= max{|r|} is expected."
+
+        if rmin_obs is None and rmax_obs is None:
+            obs_correct = False
+        else:
+            obs_correct = True
+        if rmin_obs is None:
+            rmin_obs = rmin
+        if rmax_obs is None:
+            rmax_obs = rmax
+
+        parr = np.zeros(ntracer, dtype=Particle_dtype)
+        parr['r'] = rr
+        parr['L2'] = L2
+        parr['rmin_obs'] = rmin_obs
+        parr['rmax_obs'] = rmax_obs
+
+        self.__dict__.update(locals)
+        self.__dict__.pop('self', None)
+
+    def update_potential(self, pot):
+        U = pot.potential(self.rr)
+        E = self.U + self.K
+        L2mapper = L2maxMapper(self.rmin, self.rmax, pot)
+        L2_max = L2mapper.L2_max(E, return_r=False)
+        j2 = L2 / L2_max
+
+        self._parr['E'] = E
+
+        T = tracer.data['Tr']
+        if self.obs_correct:
+            w = tracer.data['Tr'] / tracer.data['Tr_obs']
+
+        self.__dict__.update(locals)
+        self.__dict__.pop('self', None)
+
+
 class Estimator:
     N_RBIN_INTERP = 501
     N_EBIN = 51
@@ -198,30 +250,9 @@ class Estimator:
         ntracer = len(r)
         assert r.shape == v.shape == (ntracer, 3), "r and v should have the same shape (n, 3)."
 
-        rr, vv, vr, vt = decompose_r_v(self.r, self.v)
-        K = 0.5 * vv**2
-        L = vr * rr
-        L2 = L**2
+        tracer = Tracer(r, v)
 
-        parr = np.zeros(ntracer, dtype=Particle_dtype)
-        parr['r'] = rr
-        parr['L2'] = L2
-
-        if rmin is None:
-            rmin = rr.min()
-        else:
-            assert rmin <= rr.min(), "rmin <= min{|r|} is expected."
-        if rmax is None:
-            rmax = rr.max()
-        else:
-            assert rmax >= rr.max(), "rmax <= max{|r|} is expected."
-
-        if rmin_obs is not None:
-            assert len(rmin_obs) == ntracer
-            parr['rmin_obs'] = rmin_obs
-        if rmax_obs is not None:
-            assert len(rmax_obs) == ntracer
-            parr['rmax_obs'] = rmax_obs
+        rr = tracer.rr
 
         self.r = r
         self.v = v
@@ -255,21 +286,6 @@ class Estimator:
         self.integrator.update_potential(r, p)
         self.integrator.solve_radial_limits()
         self.integrator.integrate_radial_period(set_tcur=True, set_tobs=False)
-
-        U = self.pot.potential(self.rr, param)
-        E = self.K + U
-        self._parr['E'] = E
-
-        L2_max = self.pot.L2_max(E, return_r=False)
-        j2 = L2 / L2_max
-
-        T = tracer.data['Tr']
-        if self.obs_correct:
-            w = tracer.data['Tr'] / tracer.data['Tr_obs']
-
-        self.U = U
-        self.E = E
-        self.j2 = j2
 
         res, loc = {}, locals()
         for key in ['T', 'am_max',
