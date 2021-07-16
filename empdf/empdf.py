@@ -12,7 +12,6 @@ from oPDF import oPDF
 from handy import EqualGridInterpolator
 from scipy.interpolate import CubicSpline
 from scipy.special import roots_legendre
-from itertools import product as iter_product
 
 # -----------------------------------------------
 import cyper
