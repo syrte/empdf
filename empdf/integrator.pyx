@@ -30,7 +30,7 @@ Particle_dtype = np.dtype({
 
 
 cdef packed struct Particle_t:
-    double E         # E = 0.5 v^2 + pot
+    double E         # E = 0.5 v^2 + U
     double L2        # L^2
     double r         # current position
     double rmin      # orbit limits
@@ -276,7 +276,7 @@ cdef class Integrator:
         public double rmin
         public double rmax
         public double[:] r
-        public double[:] pot
+        public double[:] U
         gsl_spline * potential = NULL
 
     def __cinit__(self):
@@ -291,7 +291,7 @@ cdef class Integrator:
         self.rmin = rmin
         self.rmax = rmax
 
-    def update_potential(self, double[:] r, double[:] pot):
+    def update_potential(self, double[:] r, double[:] U):
         """
         update potential with radius and potential array
         """
@@ -300,14 +300,14 @@ cdef class Integrator:
             gsl_spline * potential = gsl_spline_alloc(gsl_interp_cspline, n)
             # Cubic spline with natural boundary conditions
 
-        gsl_spline_init(potential, &r[0], &pot[0], n)
+        gsl_spline_init(potential, &r[0], &U[0], n)
 
         if self.potential != NULL:
             gsl_spline_free(self.potential)
         self.potential = potential
 
         self.r = r
-        self.pot = pot
+        self.U = U
 
     def solve_radial_limits(self):
         """
