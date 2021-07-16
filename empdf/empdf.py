@@ -34,22 +34,6 @@ Particle_dtype = pyx.Particle_dtype
 
 
 # -----------------------------------------------
-G = 43007.1
-
-
-# -----------------------------------------------
-# def interp(x, xp, yp):
-#     return CubicSpline(xp, yp)(x)
-
-
-# def interp_logy(x, xp, yp):
-#     return np.exp(CubicSpline(xp, np.log(yp))(x))
-
-
-# def interp_loglog(x, xp, yp):
-#     return np.exp(CubicSpline(np.log(xp), np.log(yp))(np.log(x)))
-
-
 def _setattr_dict(obj, var_dict, var_list=None):
     """
     Set attrs of obj by given dict, skipping 'self'
@@ -157,7 +141,7 @@ class DFInterpolator:
 
         pot_util.integrator.set_data(buffer.reshape(-1), pot_util.rmin, pot_util.rmax)
         pot_util.integrator.solve_radial_limits()
-        pot_util.integrator.integrate_radial_period(set_tcur=False, set_tobs=False)
+        pot_util.integrator.compute_radial_period(set_tcur=False, set_tobs=False)
 
         Tr = buffer['Tr'].copy()
         p_Ej2 = N_Ej2_interp(E, j2)
@@ -253,7 +237,7 @@ class Tracer:
         integrator = self.pot_util.integrator
         integrator.set_data(self.buffer, self.rmin, self.rmax)
         integrator.solve_radial_limits()
-        integrator.integrate_radial_period(set_tcur=set_phase, set_tobs=set_wobs)
+        integrator.compute_radial_period(set_tcur=set_phase, set_tobs=set_wobs)
 
         self.Tr = self.buffer['Tr'].copy()
         if set_phase:
@@ -262,6 +246,12 @@ class Tracer:
         if set_wobs:
             self.wgt_obs = self.buffer['Tr'] / self.buffer['Tr_obs']
             self.buffer['wgt_obs'] = self.wgt_obs
+
+    def count_raidal_bin(self, rbin):
+        integrator = self.pot_util.integrator
+        integrator.set_data(self.buffer, self.rmin, self.rmax)
+        bincount = integrator.count_raidal_bin()
+        return bincount
 
 
 class Estimator:
@@ -359,7 +349,8 @@ class Estimator:
     def lnp_opdf(self, param=None):
         self._update_param(param)
         nbin = int(max(round(np.log(self.ntracer)), 2))
-        bins = np.linspace(tracer.rmin, tracer.rmax, nbin + 1)
+        rbin = np.linspace(self.rmin, self.rmax, nbin + 1)
+        bincount = self.tracer.count_raidal_bin(rbin)
         return self.integrator.likelihood(param, oPDF.Estimators.RBinLike)
 
     def lnp_AD(self, param=None):
