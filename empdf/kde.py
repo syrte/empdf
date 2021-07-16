@@ -38,9 +38,6 @@ def MADN(x, axis=None, keepdims=False):
     The normalized median absolute deviation (MADN),
     a robust measure of scale that is more robust than IQR.
     See https://en.wikipedia.org/wiki/Robust_measures_of_scale
-
-    shape (n,) --> scalar
-    shape (n, d) --> shape (d,)
     """
     med = np.median(x, axis=axis, keepdims=True)
     return np.median(np.abs(x - med), axis=axis, keepdims=keepdims) * 1.4826
@@ -112,15 +109,20 @@ class KDE:
     def __init__(self, data, weights=None, boundary=None,
                  backend='sklearn', bw_factor=1, kernel='epanechnikov', **options):
         """
+        Parameters
+        ----------
         data: shape (n, d)
         weights: shape (n,)
         boundary: None or shape (d, 2)
+            If not None, reflex boundary correction is used for each axis.
         backend: ['scipy', 'sklearn', 'KDEpy.FFTKDE', 'KDEpy.TreeKDE']
         bw_factor:
             bandwidth = Scott's rule * bw_factor
         options:
             sklearn: kernel='epanechnikov'
 
+        Examples
+        --------
         data = np.stack([E, j2], axis=-1)
         kde = KDE2D(data, weights=w, boundary=[[Emin, None], [0, 1]],
                     backend='sklearn', kernel='epanechnikov')
