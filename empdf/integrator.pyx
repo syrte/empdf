@@ -277,7 +277,7 @@ cdef class Integrator:
         public double rmax
         public double[:] r
         public double[:] U
-        gsl_spline * potential = NULL
+        gsl_spline * potential
 
     def __cinit__(self):
         self.potential = NULL
@@ -286,12 +286,12 @@ cdef class Integrator:
         if self.potential != NULL:
             gsl_spline_free(self.potential)
 
-    def update_data(self, Particle_t[:] parr, double rmin, double rmax):
+    def set_data(self, Particle_t[:] parr, double rmin, double rmax):
         self.parr = parr
         self.rmin = rmin
         self.rmax = rmax
 
-    def update_potential(self, double[:] r, double[:] U):
+    def set_potential(self, double[:] r, double[:] U):
         """
         update potential with radius and potential array
         """
