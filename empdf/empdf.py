@@ -51,211 +51,21 @@ def decompose_r_v(r, v):
 
 
 # -----------------------------------------------
-def interp(x, xp, yp):
-    return CubicSpline(xp, yp)(x)
+# def interp(x, xp, yp):
+#     return CubicSpline(xp, yp)(x)
 
 
-def interp_logy(x, xp, yp):
-    return np.exp(CubicSpline(xp, np.log(yp))(x))
+# def interp_logy(x, xp, yp):
+#     return np.exp(CubicSpline(xp, np.log(yp))(x))
 
 
-def interp_loglog(x, xp, yp):
-    return np.exp(CubicSpline(np.log(xp), np.log(yp))(np.log(x)))
+# def interp_loglog(x, xp, yp):
+#     return np.exp(CubicSpline(np.log(xp), np.log(yp))(np.log(x)))
 
 
 # -----------------------------------------------
-def compute_neff(weights, normed=False):
-    if normed:
-        return 1 / np.sum(weights**2)
-    else:
-        return np.sum(weights)**2 / np.sum(weights**2)
 
-
-def scotts_factor(neff, d):
-    """
-    Scott's rule of thumb, adopted as default in scipy.stats.gaussian_kde
-
-    neff: 
-        Effective number of data points
-    d: 
-        Number of dimensions
-
-    See Scott 2015, "Multivariate Density Estimation: Theory, Practice, and Visualization"
-    """
-    return neff**(-1. / (d + 4))
-
-
-def MADN(x):
-    """
-    The normalized median absolute deviation (MADN),
-    a robust measure of scale that is more robust than IQR.
-    See https://en.wikipedia.org/wiki/Robust_measures_of_scale
-
-    shape (n,) --> scalar
-    shape (n, d) --> shape (d,)
-    """
-    return np.median(np.abs(x - np.median(x, axis=0)), axis=0) * 1.4826
-
-
-def boundary_reflex(x, boundary=None, c_contiguous=False):
-    """
-    Parameters
-    ----------
-    x: shape(n, d)
-    boundary: None or shape (d, 2)
-    c_contiguous:
-        Make no difference for building KDTree and queries.
-
-    Returns
-    -------
-    out: shape(m*n, d)
-        m is the number of combinations: m = prod_i (len(boundary[i]) + 1)
-        out always satisfies out[:n] == x
-
-    Examples
-    --------
-    n = 1000
-    x = np.random.rand(n, 3)
-    a = boundary_reflex(x, [[0, 1], [0], None])  # bounds: [0, 1]x[0, inf]x[-inf, inf]
-    assert a.shape == (6*n, 3)
-    assert np.array_equal(a[:n], x)
-    plt.scatter(x.T[0], x.T[1])
-    plt.scatter(a.T[0], a.T[1], s=5)
-    """
-    n, d = x.shape
-    if boundary is None:
-        out = x
-    else:
-        arr_list = [[] for i in range(d)]
-        for i in range(d):
-            xi = x[:, i]
-            arr_list[i].append(xi)  # original
-            if boundary[i] is None:
-                continue
-            else:
-                for bound in boundary[i]:
-                    if bound is None:
-                        continue
-                    else:
-                        arr_list[i].append(2 * bound - xi)  # reflected
-        arr_join = np.array(list(iter_product(*arr_list)))  # shape (m, d, n)
-        out = arr_join.transpose(0, 2, 1).reshape(-1, d)  # correct shape (m*n, d)
-
-    if c_contiguous:
-        out = np.ascontiguousarray(out)
-    return out
-
-
-# See Table 6.2, Scott 2015
-# and https://scikit-learn.org/stable/modules/density.html
-kernel_var_dict = dict(
-    tophat=1 / 3,
-    linear=1 / 6,
-    epanechnikov=1 / 5,
-    normal=1,
-    cosine=1 - 8 / np.pi**2
-)
-
-
-class KDE:
-    N_BIN_FFT = 100
-
-    def __init__(self, data, weights=None, boundary=None,
-                 backend='sklearn', bw_factor=1, kernel='epanechnikov', **options):
-        """
-        data: shape (n, d)
-        weights: shape (n,)
-        boundary: None or shape (d, 2)
-        backend: ['scipy', 'sklearn', 'KDEpy.FFTKDE', 'KDEpy.TreeKDE']
-        bw_factor:
-            bandwidth = Scott's rule * bw_factor
-        options:
-            sklearn: kernel='epanechnikov'
-
-        data = np.stack([E, j2], axis=-1)
-        kde = KDE2D(data, weights=w, boundary=[[Emin, None], [0, 1]],
-                    backend='sklearn', kernel='epanechnikov')
-        """
-        n, d = data.shape
-
-        # calculate neff before reflex
-        if weights is None:
-            neff = n
-        else:
-            assert weights.shape == (n,), "incorrect `weights` shape!"
-            weights = weights / np.sum(weights)
-            neff = compute_neff(weights, normed=True)
-        bandwidth = scotts_factor(neff, d=d) * bw_factor
-
-        # reflect to reduce bias at boundary
-        if boundary is not None:
-            assert len(boundary) == d, "incorrect `boundary` shape!"
-            data = boundary_reflex(data, boundary=boundary)
-            nrep = len(data) // n  # number of duplicates
-
-            if weights is not None:
-                weights = np.tile(weights, nrep)  # duplicate weights as well
-        else:
-            nrep = 1
-
-        # calculate scale; scipy has its own scale
-        if backend != 'scipy':
-            # use the original n points for scale
-            scale = MADN(data[:n])
-            pdf_scale = np.prod(scale)
-            data_scaled = data / scale
-
-        # initialize KDE estimator
-        if backend == 'scipy':
-            from scipy.stats import gaussian_kde
-
-            # initialize with the original n points for covariance matrix
-            # this modified kde object is only designed for calling kde.pdf and kde.logpdf
-            kde = gaussian_kde(data[:n].T, weights=weights[:n], bw_method=bandwidth)
-            kde.dataset = data.T
-            kde.n = len(data)
-            if weights is None:
-                kde._weights = np.ones(kde.n) / kde.n
-            else:
-                kde._weights = weights / nrep  # normalized to 1
-
-        if backend == 'sklearn':
-            from sklearn.neighbors import KernelDensity
-
-            options.setdefault('rtol', 1e-6)
-            bw_normed = bandwidth / kernel_var_dict[kernel]**0.5  # normalize kernels to var = 1
-            kde = KernelDensity(kernel=kernel, bandwidth=bw_normed, **options)
-            kde.fit(data_scaled, sample_weight=weights)
-
-        elif backend == 'KDEpy.FFTKDE' or backend == 'KDEpy.TreeKDE':
-            raise NotImplementedError
-
-        ldict = locals()
-        for key in ['kde', 'data', 'weights', 'boundary', 'backend', 'n', 'nrep',
-                    'scale', 'pdf_scale', 'data_scaled', 'bandwidth']:
-            if key in ldict:
-                setattr(self, key, ldict[key])
-
-    def pdf(self, data, scaled=False):
-        if self.backend == 'scipy':
-            return self.nrep * self.kde.pdf(data.T)
-
-        elif self.backend == 'sklearn':
-            if scaled:
-                lnp = self.kde.score_samples(data)
-            else:
-                lnp = self.kde.score_samples(data / self.scale)
-            return self.nrep / self.pdf_scale * np.exp(lnp)
-
-        else:
-            raise NotImplementedError
-
-    def autopdf(self):
-        if self.backend == 'scipy':
-            return self.pdf(self.data[:self.n])
-        else:
-            return self.pdf(self.data_scaled[:self.n], scaled=True)
-
+# -----------------------------------------------
 
 class L2maxMapper:
     N_GRID = 1001
@@ -282,6 +92,10 @@ class L2maxMapper:
         del self.self
 
     def L2_max(self, E, return_r=False):
+        """
+        return_r:
+            return the circular orbit give E, clipped to [rmin, rmax]
+        """
         L2_max = np.exp(self.interp_lnL2_cir(E))
 
         ix1 = E <= self.E_cir[0]
@@ -300,75 +114,77 @@ class L2maxMapper:
 
 
 class DFInterpolator:
-    N_EBIN_R = 50
-    N_JBIN_R = 50
-    N_RBIN = 50
+    N_EBIN_I = 100  # interpolator for DF(E, j2)
+    N_JBIN_I = 100  # interpolator for DF(E, j2)
 
-    x1, w1 = roots_legendre(N_EBIN_R)
-    x2, w2 = roots_legendre(N_JBIN_R)  # x2 in [-1, 1]
+    N_RBIN_R = 50
+    N_VBIN_R = 50  # quadrature grids for rho(r)
+    N_CBIN_R = 50  # quadrature grids for rho(r)
+
+    x1, w1 = roots_legendre(N_VBIN_R)
+    x2, w2 = roots_legendre(N_CBIN_R)
+    x1 = 0.5 * x1 + 0.5  # x1 in [0, 1]
+    w1 = 0.5 * w1
     x2 = 0.5 * x2 + 0.5  # x2 in [0, 1]
     w2 = 0.5 * w2
 
-    def __init__(self, Emin, Emax, rmin, rmax, N_EBIN, N_JBIN, L2mapper, N_Ej2_interp, integrator):
-        E = np.linspace(Emin, Emax, N_EBIN)
-        j2 = np.linspace(0, 1, N_JBIN)
-        E2d, j22d = np.meshgrid(E, j2, sparse=True, indexing='ij')
+    # @classmethod
+    # def set_params(cls, N_RBIN_R):
 
-        r_pin = L2mapper.r_pin(E2d)
-        L2_max = L2mapper.L2_max(E2d)
-        L2 = L2_max * j2
+    def __init__(self, Emin, Emax, L2mapper, N_Ej2_interp, integrator):
 
-        parr = np.zeros((N_EBIN, N_JBIN), dtype=Particle_dtype)
-        parr['r'] = r_pin
-        parr['E'] = E2d
-        parr['L2'] = L2
+        E = np.linspace(Emin, Emax, self.N_EBIN_I)
+        j2 = np.linspace(0, 1, self.N_JBIN_I)
+        L2_max, r_pin = L2mapper.L2_max(E, return_r=True)
 
-        integrator.update_data(parr.ravel(), rmin, rmax)
+        parr = np.zeros((self.N_EBIN_I, self.N_JBIN_I), dtype=Particle_dtype)
+        parr['r'] = r_pin.reshape(-1, 1)
+        parr['E'] = E.reshape(-1, 1)
+        parr['L2'] = L2_max.reshape(-1, 1) * j2
+
+        integrator.update_data(parr.reshape(-1), L2mapper.rmin, L2mapper.rmax)
         integrator.solve_radial_limits()
         integrator.integrate_radial_period(set_tcur=False, set_tobs=False)
 
         Tr = parr['Tr']
         p_Ej2 = N_Ej2_interp(E, j2)
-        f = p_Ej2 / (4 * np.pi**2 * Tr * L2_max)
+        f_Ej2 = p_Ej2 / (4 * np.pi**2 * Tr * L2_max)
 
-        self.f_E_j2 = EqualGridInterpolator(E, j2, f)
-        self.p_Ej2 = EqualGridInterpolator(E, j2, p_Ej2)
-        self.Tr = EqualGridInterpolator(E, j2, Tr)
+        self.f_Ej2 = EqualGridInterpolator([E, j2], f_Ej2)
+        self.p_Ej2 = EqualGridInterpolator([E, j2], p_Ej2)
+        self.Tr_Ej2 = EqualGridInterpolator([E, j2], Tr)
 
-    def f_E_L2(self, E, L2):
+        self.parr = parr
+        self.L2mapper = L2mapper
+        self.rmin = L2mapper.rmin
+        self.rmax = L2mapper.rmax
+
+        self._prepare_pdf()
+
+    def f_EL2(self, E, L2):
         L2_max = self.L2mapper.L2_max(E)
         j2 = L2 / L2_max
-        return self.f_E_j2(E, j2)
+        return self.f_Ej2([E, j2])
 
-    def prepare_pdf(self):
-        r = np.linspace(self.rmin, self.rmax, self.N_RBIN)
+    def _prepare_pdf(self):
+        r = np.linspace(self.rmin, self.rmax, self.N_RBIN_R).reshape(-1, 1, 1)
         U = self.L2mapper(r)
-        vmax = (2 * (self.E_max - U))**0.5
+        vmax = (2 * (self.E_max - U))**0.5  # shape (nr, 1, 1)
 
-        v = 0.5 * vmax * self.x1 + 0.5 * vmax
-        dv = 0.5 * vmax * self.w1
-        c = self.x2  # cos(theta)
+        v = self.x1.reshape(-1, 1) * vmax  # shape (nr, nv, 1)
+        dv = self.w1.reshape(-1, 1) * vmax
+        c = self.x2  # cos(theta), shape (nc)
         dc = self.w2
 
         v2 = v**2
         E = U + 0.5 * v2
-        L2 = v2 * (1 - c**2)
-        f = self.f_E_L2(E, L2)
-        pdf_r = 4 * np.pi * (f * v2 * dv * dc).reshape(-1, 1).sum(-1)
-        cdf_r = CubicSpline(r, pdf_r * r**2).antiderivative(1)
+        L2 = r**2 * v2 * (1 - c**2)  # shape (nr, nv, nc)
+        f = self.f_EL2(E, L2)  # shape (nr, nv, nc)
+        p_r = 4 * np.pi * (f * v2 * dv * dc).reshape(-1, 1).sum(-1)
 
-        self.pdf_r = pdf_r
-        self.cdf_r = cdf_r
-
-    def pdf_r(self, r):
-        "rmin <= r <= rmax"
-        if not hasattr(self, 'pdf_r_'):
-            self.prepare_pdf()
-        return interp(r, self.r, self.pdf_r_)
-
-    def cdf_r(self, r):
-        "rmin <= r <= rmax"
-        pass
+        r = r.reshape(-1, 1)
+        self.pdf_r = CubicSpline(r, p_r)
+        self.cdf_r = CubicSpline(r, p_r * r**2).antiderivative(1)
 
 
 class Estimator:
