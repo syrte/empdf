@@ -155,7 +155,7 @@ class DFInterpolator:
         buffer['E'] = E.reshape(-1, 1)
         buffer['L2'] = L2_max.reshape(-1, 1) * j2
 
-        pot_util.integrator.update_data(buffer.reshape(-1), pot_util.rmin, pot_util.rmax)
+        pot_util.integrator.set_data(buffer.reshape(-1), pot_util.rmin, pot_util.rmax)
         pot_util.integrator.solve_radial_limits()
         pot_util.integrator.integrate_radial_period(set_tcur=False, set_tobs=False)
 
@@ -252,7 +252,6 @@ class Tracer:
         # orbit integration: Tr and wgt_obs
         integrator = self.pot_util.integrator
         integrator.set_data(self.buffer, self.rmin, self.rmax)
-
         integrator.solve_radial_limits()
         integrator.integrate_radial_period(set_tcur=set_phase, set_tobs=set_wobs)
 
@@ -266,25 +265,50 @@ class Tracer:
 
 
 class Estimator:
-    def __init__(self, r, v, pot_factory, pot_param=None, rlim=None, rlim_obs=None):
+    def __init__(self, r, v, pot_factory, pot_param=None,
+                 rlim=None, rlim_obs=None, rad_compl=None):
         """
-        pot_factory: a function of potential
+        r, v: array shape (n, 3)
+            Tracer kinematics
+        rlim: None or 2-tuple
+            Radius cut of the sample
+        rlim_obs: None or array of shape (n, 2)     
+            Observation limit for each tracer   
+        pot_factory: callable
+            A function of potential
+        pot_param: 
+            Initial parameters
+        rad_compl: callable
+            Radial completeness function, not implemented yet.
         """
         n = len(r)
         assert r.shape == v.shape == (n, 3), "r and v should have the same shape (n, 3)."
 
+        if rlim_obs is not None and rad_compl is not None:
+            raise ValueError("Only one of rlim_obs and rad_compl can be specified.")
+        if rad_compl is not None:
+            raise NotImplementedError
+
         self.tracer = Tracer(r, v, rlim=None, rlim_obs=None)
         self.rmin = self.tracer.rmin
         self.rmax = self.tracer.rmax
-        self._pot_factory = pot_factory
-        self.pot_param = pot_param
-        if self.pot_param is not None:
-            self.update_param(set_Tr=False, set_phase=False, set_wobs=False)
+
+        self.rlim_obs = rlim_obs
+        self.rad_compl = rad_compl
+
+        self.pot_factory = pot_factory
+        self.pot_param = None  # initialize with None
+
+        if pot_param is not None:
+            self.update_param(pot_param, set_Tr=False, set_phase=False, set_wobs=False)
 
     def update_param(self, param, set_Tr=True, set_phase=False, set_wobs=False):
+        if param is None:
+            return
+
         if not np.array_equal(param, self.pot_param):
             self.pot_param = param
-            self.pot = self._pot_factory(*param)
+            self.pot = self.pot_factory(*param)
             self.pot_util = PotUtility(self.rmin, self.rmax, self.pot)
             self.tracer.update_potential(self.pot_util)
             self._stale_Tr = True
@@ -294,10 +318,18 @@ class Estimator:
         if ((self._stale_Tr and set_Tr)
                 or (self._stale_phase and set_phase)
                 or (self._stale_wobs and set_wobs)):
-            self.tracer.integrate(self, set_phase=set_phase, set_wobs=set_wobs)
+            self.tracer.integrate(set_phase=set_phase, set_wobs=set_wobs)
+
             self._stale_Tr = False
             self._stale_phase = not set_phase
             self._stale_wobs = not set_wobs
+
+    def _make_orbit_grid(self):
+        tracer = self.tracer
+        N_Ej2_interp = self.N_Ej2_interp
+        Emin = tracer.Emin
+        Emax = tracer.Emax + N_Ej2_interp.bandwidth * N_Ej2_interp.scale[0] * 2  # Emax + 2 * bandwidth
+        self.df_interp = DFInterpolator(Emin, Emax, self.pot_util, self.N_Ej2_interp)
 
     def _make_N_Ej2_interp(self, **kde_opt):
         """
@@ -313,13 +345,6 @@ class Estimator:
             data, weights=weights,
             boundary=[[tracer.Emin, None], [0, 1]], **kde_opt)
 
-    def _make_orbit_grid(self):
-        tracer = self.tracer
-        N_Ej2_interp = self.N_Ej2_interp
-        Emin = tracer.Emin
-        Emax = tracer.Emax + N_Ej2_interp.bandwidth * N_Ej2_interp.scale[0] * 2  # Emax + 2 * bandwidth
-        self.df_interp = DFInterpolator(Emin, Emax, self.pot_util, self.N_Ej2_interp)
-
     def lnp_emdf(self, param=None):
         if param is not None:
             self._update_param(param)
@@ -331,26 +356,10 @@ class Estimator:
 
         return np.log(p_Ej / T / L2_max).sum()
 
-    def lnp_adap(self, param=None):
-        if param is not None:
-            self._update_param(param)
-            self._prepare_emdf()
-
-        orb = self.data_orb
-        x, y, xx, yy = orb['x'], orb['y'], orb['xx'], orb['yy']
-        T, am_max = orb['T'], orb['am_max']
-
-        n_ngb = np.floor(self.ntracer**0.5 * 2).astype('i')
-        p_Ej = AdapKDE2D(
-            xx, yy, n_eps=3, n_ngb=n_ngb,
-            scale=y.std() / x.std()
-        ).density(x, y)
-
-        return np.log(p_Ej / T / am_max**2).sum()
-
     def lnp_opdf(self, param=None):
         self._update_param(param)
-        oPDF.Estimators.RBinLike.nbin = int(max(round(np.log(self.ntracer)), 2))
+        nbin = int(max(round(np.log(self.ntracer)), 2))
+        bins = np.linspace(tracer.rmin, tracer.rmax, nbin + 1)
         return self.integrator.likelihood(param, oPDF.Estimators.RBinLike)
 
     def lnp_AD(self, param=None):
