@@ -33,7 +33,7 @@ def scotts_factor(neff, d):
     return neff**(-1. / (d + 4))
 
 
-def MADN(x):
+def MADN(x, axis=None, keepdims=False):
     """
     The normalized median absolute deviation (MADN),
     a robust measure of scale that is more robust than IQR.
@@ -42,7 +42,8 @@ def MADN(x):
     shape (n,) --> scalar
     shape (n, d) --> shape (d,)
     """
-    return np.median(np.abs(x - np.median(x, axis=0)), axis=0) * 1.4826
+    med = np.median(x, axis=axis, keepdims=True)
+    return np.median(np.abs(x - med), axis=axis, keepdims=keepdims) * 1.4826
 
 
 def boundary_reflex(x, boundary=None, c_contiguous=False):
@@ -149,7 +150,7 @@ class KDE:
         # calculate scale; scipy has its own scale
         if backend != 'scipy':
             # use the original n points for scale
-            scale = MADN(data[:n])
+            scale = MADN(data[:n], axis=0)
             pdf_scale = np.prod(scale)
             data_scaled = data / scale
 
