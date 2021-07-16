@@ -50,6 +50,18 @@ G = 43007.1
 #     return np.exp(CubicSpline(np.log(xp), np.log(yp))(np.log(x)))
 
 
+def _setattr_dict(obj, var_dict, var_list=None):
+    """
+    Set attrs of obj by given dict, skipping 'self'
+    """
+    if var_list is None:
+        var_list = var_dict.keys()
+
+    for key in var_list:
+        if key != 'self':
+            setattr(obj, key, var_dict[key])
+
+
 # -----------------------------------------------
 def decompose_r_v(r, v):
     """
@@ -65,30 +77,32 @@ def decompose_r_v(r, v):
 
 
 # -----------------------------------------------
-class L2maxMapper:
-    N_GRID = 1001
+class PotUtility:
+    N_RBIN_I = 1001
 
     def __init__(self, rmin, rmax, pot):
         """
         pot: potential object with callable '.potential' and (optional) '.mass'
         """
-        r_cir = np.linspace(rmin, rmax, self.N_GRID)
-        U_cir = pot.potential(r_cir)
+        r = np.linspace(rmin, rmax, self.N_RBIN_I)
+        U = pot.potential(r)
 
         if hasattr(pot, 'mass'):
-            m_cir = pot.mass(r_cir)
+            GM = pot.mass(r)
         else:
-            m_cir = CubicSpline(r_cir, U_cir).derivative()(r_cir) * r_cir**2 / G
-            # dU/dr=GM/r^2 => M = r^2 dU/dr / G
+            GM = CubicSpline(r, U).derivative()(r) * r**2
+            # dU/dr=GM/r^2 => GM = r^2 dU/dr
 
-        E_cir = 0.5 * G * m_cir / r_cir + U_cir
-        L2_cir = G * m_cir * r_cir
+        E_cir = 0.5 * GM / r + U
+        L2_cir = GM * r
 
         interp_lnL2_cir = CubicSpline(E_cir, np.log(L2_cir), extrapolate=False)
-        interp_lnr_cir = CubicSpline(E_cir, np.log(r_cir), extrapolate=False)
+        interp_lnr_cir = CubicSpline(E_cir, np.log(r), extrapolate=False)
 
-        self.__dict__.update(locals())
-        del self.self
+        integrator = Integrator()
+        integrator.set_potential(r, U)
+
+        _setattr_dict(self, locals())
 
     def L2_max(self, E, return_r=False):
         """
@@ -98,10 +112,10 @@ class L2maxMapper:
         L2_max = np.exp(self.interp_lnL2_cir(E))
 
         ix1 = E <= self.E_cir[0]
-        L2_max[ix1] = self.rmin**2 * 2 * (E[ix1] - self.U_cir[0])
+        L2_max[ix1] = self.rmin**2 * 2 * (E[ix1] - self.U[0])  # .clip(1e-20)  # avoid zero?
 
         ix2 = E >= self.E_cir[-1]
-        L2_max[ix2] = self.rmax**2 * 2 * (E[ix2] - self.U_cir[-1])
+        L2_max[ix2] = self.rmax**2 * 2 * (E[ix2] - self.U[-1])  # .clip(1e-20)  # avoid zero?
 
         if return_r:
             r = np.exp(self.interp_lnr_cir(E))
@@ -130,22 +144,22 @@ class DFInterpolator:
     # @classmethod
     # def set_params(cls, N_RBIN_R):
 
-    def __init__(self, Emin, Emax, L2mapper, N_Ej2_interp, integrator):
+    def __init__(self, Emin, Emax, pot_util, N_Ej2_interp):
 
         E = np.linspace(Emin, Emax, self.N_EBIN_I)
         j2 = np.linspace(0, 1, self.N_JBIN_I)
-        L2_max, r_pin = L2mapper.L2_max(E, return_r=True)
+        L2_max, r_pin = pot_util.L2_max(E, return_r=True)
 
-        parr = np.zeros((self.N_EBIN_I, self.N_JBIN_I), dtype=Particle_dtype)
-        parr['r'] = r_pin.reshape(-1, 1)
-        parr['E'] = E.reshape(-1, 1)
-        parr['L2'] = L2_max.reshape(-1, 1) * j2
+        buffer = np.zeros((self.N_EBIN_I, self.N_JBIN_I), dtype=Particle_dtype)
+        buffer['r'] = r_pin.reshape(-1, 1)
+        buffer['E'] = E.reshape(-1, 1)
+        buffer['L2'] = L2_max.reshape(-1, 1) * j2
 
-        integrator.update_data(parr.reshape(-1), L2mapper.rmin, L2mapper.rmax)
-        integrator.solve_radial_limits()
-        integrator.integrate_radial_period(set_tcur=False, set_tobs=False)
+        pot_util.integrator.update_data(buffer.reshape(-1), pot_util.rmin, pot_util.rmax)
+        pot_util.integrator.solve_radial_limits()
+        pot_util.integrator.integrate_radial_period(set_tcur=False, set_tobs=False)
 
-        Tr = parr['Tr']
+        Tr = buffer['Tr'].copy()
         p_Ej2 = N_Ej2_interp(E, j2)
         f_Ej2 = p_Ej2 / (4 * np.pi**2 * Tr * L2_max)
 
@@ -153,21 +167,21 @@ class DFInterpolator:
         self.p_Ej2 = EqualGridInterpolator([E, j2], p_Ej2)
         self.Tr_Ej2 = EqualGridInterpolator([E, j2], Tr)
 
-        self.parr = parr
-        self.L2mapper = L2mapper
-        self.rmin = L2mapper.rmin
-        self.rmax = L2mapper.rmax
+        self.buffer = buffer
+        self.pot_util = pot_util
+        self.rmin = pot_util.rmin
+        self.rmax = pot_util.rmax
 
         self._prepare_pdf()
 
     def f_EL2(self, E, L2):
-        L2_max = self.L2mapper.L2_max(E)
+        L2_max = self.pot_util.L2_max(E)
         j2 = L2 / L2_max
         return self.f_Ej2([E, j2])
 
     def _prepare_pdf(self):
         r = np.linspace(self.rmin, self.rmax, self.N_RBIN_R).reshape(-1, 1, 1)
-        U = self.L2mapper(r)
+        U = self.pot_util(r)
         vmax = (2 * (self.E_max - U))**0.5  # shape (nr, 1, 1)
 
         v = self.x1.reshape(-1, 1) * vmax  # shape (nr, nv, 1)
@@ -187,137 +201,135 @@ class DFInterpolator:
 
 
 class Tracer:
-    def __init__(self, r, v, rmin=None, rmax=None, rmin_obs=None, rmax_obs=None):
-        ntracer = len(r)
+    def __init__(self, r, v, rlim=None, rlim_obs=None):
+        """
+        r, v: array shape (n, 3)
+        rlim: None or 2-tuple
+        rlim_obs: None or array of shape (n, 2)
+        """
         rr, vv, vr, vt = decompose_r_v(self.r, self.v)
         K = 0.5 * vv**2
         L = vr * rr
         L2 = L**2
 
-        if rmin is None:
-            rmin = rr.min()
+        if rlim is None:
+            rlim = rr.min(), rr.max()
         else:
-            assert rmin <= rr.min(), "rmin <= min{|r|} is expected."
-        if rmax is None:
-            rmax = rr.max()
-        else:
-            assert rmax >= rr.max(), "rmax <= max{|r|} is expected."
+            assert rlim[0] <= rr.min(), "rlim[0] <= min{|r|} is expected."
+            assert rlim[1] >= rr.max(), "rlim[1] >= max{|r|} is expected."
 
-        if rmin_obs is None and rmax_obs is None:
-            obs_correct = False
-        else:
-            obs_correct = True
-        if rmin_obs is None:
-            rmin_obs = rmin
-        if rmax_obs is None:
-            rmax_obs = rmax
+        if rlim_obs is None:
+            rlim_obs = rlim
 
-        parr = np.zeros(ntracer, dtype=Particle_dtype)
-        parr['r'] = rr
-        parr['L2'] = L2
-        parr['rmin_obs'] = rmin_obs
-        parr['rmax_obs'] = rmax_obs
+        rmin, rmax = rlim
+        rmin_obs, rmax_obs = rlim_obs
+        assert rmin < rmax
+        assert rmin_obs
 
-        self.__dict__.update(locals)
-        self.__dict__.pop('self', None)
+        # prepare buffer or orbit integration
+        buffer = np.zeros(len(rr), dtype=Particle_dtype)
+        buffer['r'] = rr
+        buffer['L2'] = L2
+        buffer['rmin_obs'] = rmin_obs
+        buffer['rmax_obs'] = rmax_obs
 
-    def update_potential(self, pot):
-        U = pot.potential(self.rr)
+        _setattr_dict(self, locals())
+
+    def update_potential(self, pot_util):
+        # pot_util = PotUtility(self.rmin, self.rmax, pot)
+
+        U = pot_util.pot.potential(self.rr)
         E = self.U + self.K
-        L2mapper = L2maxMapper(self.rmin, self.rmax, pot)
-        L2_max = L2mapper.L2_max(E, return_r=False)
-        j2 = L2 / L2_max
+        L2_max = pot_util.L2_max(E)
+        j2 = self.L2 / L2_max
+        Emin, Emax = E.min(), E.max()
 
-        self._parr['E'] = E
+        self.buffer['E'] = E
 
-        T = tracer.data['Tr']
-        if self.obs_correct:
-            w = tracer.data['Tr'] / tracer.data['Tr_obs']
+        _setattr_dict(self, locals())
 
-        self.__dict__.update(locals)
-        self.__dict__.pop('self', None)
+    def integrate(self, set_phase=False, set_wobs=False):
+        # orbit integration: Tr and wgt_obs
+        integrator = self.pot_util.integrator
+        integrator.set_data(self.buffer, self.rmin, self.rmax)
+
+        integrator.solve_radial_limits()
+        integrator.integrate_radial_period(set_tcur=set_phase, set_tobs=set_wobs)
+
+        self.Tr = self.buffer['Tr'].copy()
+        if set_phase:
+            self.theta = 0.5 * np.sign(self.vr) * self.buffer['Tr_cur'] / self.buffer['Tr']
+
+        if set_wobs:
+            self.wgt_obs = self.buffer['Tr'] / self.buffer['Tr_obs']
+            self.buffer['wgt_obs'] = self.wgt_obs
 
 
 class Estimator:
-    N_RBIN_INTERP = 501
-    N_EBIN = 51
-    N_JBIN = 51
-
-    def __init__(self, r, v, pot_factory, rmin=None, rmax=None, rmin_obs=None, rmax_obs=None):
+    def __init__(self, r, v, pot_factory, pot_param=None, rlim=None, rlim_obs=None):
         """
         pot_factory: a function of potential
         """
-        ntracer = len(r)
-        assert r.shape == v.shape == (ntracer, 3), "r and v should have the same shape (n, 3)."
+        n = len(r)
+        assert r.shape == v.shape == (n, 3), "r and v should have the same shape (n, 3)."
 
-        tracer = Tracer(r, v)
-
-        rr = tracer.rr
-
-        self.r = r
-        self.v = v
-        self.rmin = rmin
-        self.rmax = rmax
-        self.ntracer = ntracer
+        self.tracer = Tracer(r, v, rlim=None, rlim_obs=None)
+        self.rmin = self.tracer.rmin
+        self.rmax = self.tracer.rmax
         self._pot_factory = pot_factory
-        self._parr = parr
-        self.integrator = Integrator(parr, rmin, rmax)
-        self.param = None
+        self.pot_param = pot_param
+        if self.pot_param is not None:
+            self.update_param(set_Tr=False, set_phase=False, set_wobs=False)
 
-        ldict = locals()
-        for key in ['rr', 'vv', 'vr', 'vt', 'K', 'L', 'L2']:
-            setattr(self, key, ldict[key])
+    def update_param(self, param, set_Tr=True, set_phase=False, set_wobs=False):
+        if not np.array_equal(param, self.pot_param):
+            self.pot_param = param
+            self.pot = self._pot_factory(*param)
+            self.pot_util = PotUtility(self.rmin, self.rmax, self.pot)
+            self.tracer.update_potential(self.pot_util)
+            self._stale_Tr = True
+            self._stale_phase = True
+            self._stale_wobs = True
 
-    def mass(self, r):
-        return r**2 * self.dpot_dr(r) / G
+        if ((self._stale_Tr and set_Tr)
+                or (self._stale_phase and set_phase)
+                or (self._stale_wobs and set_wobs)):
+            self.tracer.integrate(self, set_phase=set_phase, set_wobs=set_wobs)
+            self._stale_Tr = False
+            self._stale_phase = not set_phase
+            self._stale_wobs = not set_wobs
 
-    def _update_param(self, param):
-        if np.array_equal(param, self.param):
-            return
+    def _make_N_Ej2_interp(self, **kde_opt):
+        """
+        kde_opt:
+            e.g., backend='sklearn', bw_factor=1, kernel='epanechnikov'
+        """
+        tracer = self.tracer
 
-        self.param = param
-        self.pot = self._pot_factory(*param)
+        data = np.stack([tracer.E, tracer.j2], axis=-1)
+        weights = tracer.wobs
 
-        r = np.linspace(self.rmin, self.rmax, self.N_RBIN_INTERP)
-        p = self.pot.potential(r, param)
-        self.pot = CubicSpline(r, p, bc_type='natural', extrapolate=False)
-        self.dpot_dr = self.pot.derivative(1)
+        self.N_Ej2_interp = KDE(
+            data, weights=weights,
+            boundary=[[tracer.Emin, None], [0, 1]], **kde_opt)
 
-        self.integrator.update_potential(r, p)
-        self.integrator.solve_radial_limits()
-        self.integrator.integrate_radial_period(set_tcur=True, set_tobs=False)
-
-        res, loc = {}, locals()
-        for key in ['T', 'am_max',
-                    'E', 'j2', 'wi',
-                    'x', 'y', 'w', 'xx', 'yy', 'ww']:
-            res[key] = loc[key]
-
-        self.data_orb = res
-
-        # preparing points
-        # ----------------------------
-        x, y, w = E, j2, wi
-        xx = np.concatenate([x, x, x])
-        yy = np.concatenate([y, 2 - y, -y])  # to make a symmetric boundary
-        ww = np.concatenate([w, w, w])
-
-    def _make_orbit_grid(self, ):
-        Emin, Emax = self.E.min(), self.E.max()
+    def _make_orbit_grid(self):
+        tracer = self.tracer
+        N_Ej2_interp = self.N_Ej2_interp
+        Emin = tracer.Emin
+        Emax = tracer.Emax + N_Ej2_interp.bandwidth * N_Ej2_interp.scale[0] * 2  # Emax + 2 * bandwidth
+        self.df_interp = DFInterpolator(Emin, Emax, self.pot_util, self.N_Ej2_interp)
 
     def lnp_emdf(self, param=None):
         if param is not None:
             self._update_param(param)
             self._prepare_emdf()
 
-        orb = self.data_orb
-        x, y, xx, yy = orb['x'], orb['y'], orb['xx'], orb['yy']
-        T, am_max = orb['T'], orb['am_max']
+        tracer = self.tracer
+        T, L2_max = tracer['T'], tracer['L2_max']
+        p_Ej = self.N_Ej2_interp.autopdf()
 
-        # XXX: need a weighted version
-        p_Ej = gaussian_kde((xx, yy))((x, y))
-
-        return np.log(p_Ej / T / am_max**2).sum()
+        return np.log(p_Ej / T / L2_max).sum()
 
     def lnp_adap(self, param=None):
         if param is not None:
@@ -348,3 +360,8 @@ class Estimator:
     def lnp_MeanPhase(self, param=None):
         self._update_param(param)
         return -self.integrator.likelihood(param, oPDF.Estimators.MeanPhase)
+
+        # self.pot = CubicSpline(r, p, bc_type='natural', extrapolate=False)
+        # self.dpot_dr = self.pot.derivative(1)
+        # def mass(self, r):
+        #     return r**2 * self.dpot_dr(r) / G
