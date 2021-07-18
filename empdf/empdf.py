@@ -46,6 +46,10 @@ def _setattr_dict(obj, var_dict, var_list=None):
             setattr(obj, key, var_dict[key])
 
 
+class Status:
+    pass
+
+
 # -----------------------------------------------
 def decompose_r_v(r, v):
     """
@@ -190,6 +194,7 @@ class Tracer:
         r, v: array shape (n, 3)
         rlim: None or 2-tuple
         rlim_obs: None or array of shape (n, 2)
+            Should be sub-interval of rlim.
         """
         rr, vv, vr, vt = decompose_r_v(self.r, self.v)
         K = 0.5 * vv**2
@@ -208,7 +213,7 @@ class Tracer:
         rmin, rmax = rlim
         rmin_obs, rmax_obs = rlim_obs
         assert rmin < rmax
-        assert rmin_obs
+        assert np.all(rmin_obs < rmax_obs)
 
         # prepare buffer or orbit integration
         buffer = np.zeros(len(rr), dtype=Particle_dtype)
@@ -216,6 +221,8 @@ class Tracer:
         buffer['L2'] = L2
         buffer['rmin_obs'] = rmin_obs
         buffer['rmax_obs'] = rmax_obs
+
+        stale = Status()  # status flags
 
         _setattr_dict(self, locals())
 
@@ -228,24 +235,47 @@ class Tracer:
         j2 = self.L2 / L2_max
         Emin, Emax = E.min(), E.max()
 
-        self.buffer['E'] = E
-
         _setattr_dict(self, locals())
 
-    def integrate(self, set_phase=False, set_wobs=False):
+        self.buffer['E'] = E
+
+        self.stale.rlim = True
+        self.stale.Tr = True
+        self.stale.phase = True
+        self.stale.wobs = True
+
+    def integrate(self, set_Tr=True, set_phase=False, set_wobs=False):
         # orbit integration: Tr and wgt_obs
+
+        stale = self.stale
         integrator = self.pot_util.integrator
         integrator.set_data(self.buffer, self.rmin, self.rmax)
-        integrator.solve_radial_limits()
-        integrator.compute_radial_period(set_tcur=set_phase, set_tobs=set_wobs)
 
-        self.Tr = self.buffer['Tr'].copy()
-        if set_phase:
-            self.theta = 0.5 * np.sign(self.vr) * self.buffer['Tr_cur'] / self.buffer['Tr']
+        if stale.rlim:
+            integrator.solve_radial_limits()
+            stale.rlim = False
 
-        if set_wobs:
-            self.wgt_obs = self.buffer['Tr'] / self.buffer['Tr_obs']
-            self.buffer['wgt_obs'] = self.wgt_obs
+        if set_phase or set_wobs:
+            set_Tr = True
+
+        set_Tr = stale.Tr and set_Tr
+        set_phase = stale.phase and set_phase
+        set_wobs = stale.wobs and set_wobs
+
+        if (set_Tr or set_phase or set_wobs):
+            integrator.compute_radial_period(set_t=set_Tr, set_tcur=set_phase, set_tobs=set_wobs)
+
+            if set_Tr:
+                self.Tr = self.buffer['Tr'].copy()
+                stale.Tr = False
+            if set_phase:
+                self.theta = 0.5 * np.sign(self.vr) * self.buffer['Tr_cur'] / self.buffer['Tr']
+                stale.phase = False
+
+            if set_wobs:
+                self.wgt_obs = self.buffer['Tr'] / self.buffer['Tr_obs']
+                self.buffer['wgt_obs'] = self.wgt_obs
+                stale.wgt_obs = False
 
     def count_raidal_bin(self, rbin):
         integrator = self.pot_util.integrator
@@ -256,27 +286,27 @@ class Tracer:
 
 class Estimator:
     def __init__(self, r, v, pot_factory, pot_param=None,
-                 rlim=None, rlim_obs=None, rad_compl=None):
+                 rlim=None, rlim_obs=None, pobs_fun=None):
         """
         r, v: array shape (n, 3)
             Tracer kinematics
-        rlim: None or 2-tuple
-            Radius cut of the sample
-        rlim_obs: None or array of shape (n, 2)     
-            Observation limit for each tracer   
         pot_factory: callable
             A function of potential
         pot_param: 
             Initial parameters
-        rad_compl: callable
+        rlim: None or 2-tuple
+            Radius cut of the sample
+        rlim_obs: None or array of shape (n, 2)     
+            Observation limit for each tracer   
+        pobs_fun: callable
             Radial completeness function, not implemented yet.
         """
         n = len(r)
         assert r.shape == v.shape == (n, 3), "r and v should have the same shape (n, 3)."
 
-        if rlim_obs is not None and rad_compl is not None:
-            raise ValueError("Only one of rlim_obs and rad_compl can be specified.")
-        if rad_compl is not None:
+        if rlim_obs is not None and pobs_fun is not None:
+            raise ValueError("Only one of rlim_obs and pobs_fun can be specified.")
+        if pobs_fun is not None:
             raise NotImplementedError
 
         self.tracer = Tracer(r, v, rlim=None, rlim_obs=None)
@@ -284,7 +314,7 @@ class Estimator:
         self.rmax = self.tracer.rmax
 
         self.rlim_obs = rlim_obs
-        self.rad_compl = rad_compl
+        self.pobs_fun = pobs_fun
 
         self.pot_factory = pot_factory
         self.pot_param = None  # initialize with None
@@ -292,7 +322,7 @@ class Estimator:
         if pot_param is not None:
             self.update_param(pot_param, set_Tr=False, set_phase=False, set_wobs=False)
 
-    def update_param(self, param, set_Tr=True, set_phase=False, set_wobs=False):
+    def update_param(self, param, set_Tr=False, set_phase=False, set_wobs=False):
         if param is None:
             return
 
@@ -301,18 +331,7 @@ class Estimator:
             self.pot = self.pot_factory(*param)
             self.pot_util = PotUtility(self.rmin, self.rmax, self.pot)
             self.tracer.update_potential(self.pot_util)
-            self._stale_Tr = True
-            self._stale_phase = True
-            self._stale_wobs = True
-
-        if ((self._stale_Tr and set_Tr)
-                or (self._stale_phase and set_phase)
-                or (self._stale_wobs and set_wobs)):
-            self.tracer.integrate(set_phase=set_phase, set_wobs=set_wobs)
-
-            self._stale_Tr = False
-            self._stale_phase = not set_phase
-            self._stale_wobs = not set_wobs
+            self.tracer.integrate(set_Tr=set_Tr, set_phase=set_phase, set_wobs=set_wobs)
 
     def _make_orbit_grid(self):
         tracer = self.tracer
@@ -341,10 +360,10 @@ class Estimator:
             self._prepare_emdf()
 
         tracer = self.tracer
-        T, L2_max = tracer['T'], tracer['L2_max']
+        Tr, L2_max = tracer.Tr, tracer.L2_max
         p_Ej = self.N_Ej2_interp.autopdf()
 
-        return np.log(p_Ej / T / L2_max).sum()
+        return np.log(p_Ej / Tr / L2_max).sum()
 
     def lnp_opdf(self, param=None):
         self._update_param(param)
