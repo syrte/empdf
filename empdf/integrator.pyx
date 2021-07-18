@@ -138,11 +138,12 @@ cdef void solve_radial_limits(Particle_t[:] parr, double rmin, double rmax, gsl_
         free(orbit)
 
 
-cdef void compute_radial_period(Particle_t[:] parr, gsl_spline * potential, bint set_tcur, bint set_tobs) nogil:
+cdef void compute_radial_period(Particle_t[:] parr, gsl_spline * potential,
+                                bint set_t, bint set_tcur, bint set_tobs) nogil:
     cdef:
         int i, j, n = len(parr)
         Particle_t * p
-        double rmin, rmax
+        double rmin, rmax, t
         double pderiv, pderiv2  # 1st, 2nd derivatives of potential
 
         int MAX_INTVAL = 1000
@@ -173,11 +174,10 @@ cdef void compute_radial_period(Particle_t[:] parr, gsl_spline * potential, bint
             orbit.L2 = p.L2
 
             if p.rmin < p.rmax:
-                gsl_integration_cquad(func, p.rmin, p.rmax, ABS_EPS, REL_EPS, workspace, &p.Tr, NULL, NULL)
-
+                if set_t:
+                    gsl_integration_cquad(func, p.rmin, p.rmax, ABS_EPS, REL_EPS, workspace, &p.Tr, NULL, NULL)
                 if set_tcur:
                     gsl_integration_cquad(func, p.rmin, p.r, ABS_EPS, REL_EPS, workspace, &p.Tr_cur, NULL, NULL)
-
                 if set_tobs:
                     rmin = fmax(p.rmin, p.rmin_obs)
                     rmax = fmin(p.rmax, p.rmax_obs)
@@ -190,13 +190,14 @@ cdef void compute_radial_period(Particle_t[:] parr, gsl_spline * potential, bint
                 # it seems very close to circular orbit
                 pderiv = gsl_spline_eval_deriv(potential, p.r, spl_acc)
                 pderiv2 = gsl_spline_eval_deriv2(potential, p.r, spl_acc)
-                p.Tr = 2 * pi * sqrt(p.r / (3 * pderiv + p.r * pderiv2))
+                t = 2 * pi * sqrt(p.r / (3 * pderiv + p.r * pderiv2))
 
+                if set_t:
+                    p.Tr = t
                 if set_tcur:
-                    p.Tr_cur = p.Tr * gsl_rng_uniform(rng)  # a random number
-
+                    p.Tr_cur = t * gsl_rng_uniform(rng)  # a random number
                 if set_tobs:
-                    p.Tr_obs = p.Tr  # the whole circular orbit is observable
+                    p.Tr_obs = t  # the whole circular orbit is observable
 
         gsl_interp_accel_free(spl_acc)
         gsl_integration_cquad_workspace_free(workspace)
@@ -317,12 +318,12 @@ cdef class Integrator:
         """
         solve_radial_limits(self.parr, self.rmin, self.rmax, self.potential)
 
-    def compute_radial_period(self, bint set_tcur=False, bint set_tobs=False):
+    def compute_radial_period(self, bint set_t=True, bint set_tcur=False, bint set_tobs=False):
         """
         set_tcur: calculate the time from rmin to r
         set_tobs: calculate the time from rmin_obs, rmax_obs
         """
-        compute_radial_period(self.parr, self.potential, set_tcur=set_tcur, set_tobs=set_tobs)
+        compute_radial_period(self.parr, self.potential, set_t=set_t, set_tcur=set_tcur, set_tobs=set_tobs)
 
     def count_raidal_bin(self, double[:] rbin):
         """
