@@ -12,6 +12,8 @@ from oPDF import oPDF
 from handy import EqualGridInterpolator
 from scipy.interpolate import CubicSpline
 from scipy.special import roots_legendre
+from scipy.stats import multinomial
+from scipy.stats import norm as normal
 
 from .kde import KDE
 
@@ -113,6 +115,11 @@ class PotUtility:
         else:
             return L2_max
 
+    # self.pot = CubicSpline(r, p, bc_type='natural', extrapolate=False)
+    # self.dpot_dr = self.pot.derivative(1)
+    # def mass(self, r):
+    #     return r**2 * self.dpot_dr(r) / G
+
 
 class DFInterpolator:
     N_EBIN_I = 100  # interpolator for DF(E, j2)
@@ -200,6 +207,7 @@ class Tracer:
         K = 0.5 * vv**2
         L = vr * rr
         L2 = L**2
+        n = len(rr)
 
         if rlim is None:
             rlim = rr.min(), rr.max()
@@ -243,6 +251,8 @@ class Tracer:
         self.stale.Tr = True
         self.stale.phase = True
         self.stale.wobs = True
+        self.stale.N_Ej2 = True
+        self.stale.grid = True
 
     def integrate(self, set_Tr=True, set_phase=False, set_wobs=False):
         # orbit integration: Tr and wgt_obs
@@ -283,6 +293,37 @@ class Tracer:
         bincount = integrator.count_raidal_bin()
         return bincount
 
+    def make_N_Ej2_interp(self, **kde_opt):
+        """
+        kde_opt:
+            e.g., backend='sklearn', bw_factor=1, kernel='epanechnikov'
+        """
+        if not self.stale.N_Ej2:
+            return
+
+        tracer = self.tracer
+
+        data = np.stack([tracer.E, tracer.j2], axis=-1)
+        weights = tracer.wobs
+
+        self.N_Ej2_interp = KDE(
+            data, weights=weights,
+            boundary=[[tracer.Emin, None], [0, 1]], **kde_opt)
+        self.stale.N_Ej2 = False
+
+    def make_orbit_grid(self):
+        if not self.stale.grid:
+            return
+
+        tracer = self.tracer
+        N_Ej2_interp = self.N_Ej2_interp
+
+        Emin = tracer.Emin
+        Emax = tracer.Emax + N_Ej2_interp.bandwidth * N_Ej2_interp.scale[0] * 2  # Emax + 2 * bandwidth
+
+        self.df_interp = DFInterpolator(Emin, Emax, self.pot_util, self.N_Ej2_interp)
+        self.stale.grid = False
+
 
 class Estimator:
     def __init__(self, r, v, pot_factory, pot_param=None,
@@ -310,6 +351,7 @@ class Estimator:
             raise NotImplementedError
 
         self.tracer = Tracer(r, v, rlim=None, rlim_obs=None)
+        self.ntracer = self.tracer.n
         self.rmin = self.tracer.rmin
         self.rmax = self.tracer.rmax
 
@@ -320,67 +362,106 @@ class Estimator:
         self.pot_param = None  # initialize with None
 
         if pot_param is not None:
-            self.update_param(pot_param, set_Tr=False, set_phase=False, set_wobs=False)
+            self.update_param(pot_param)
 
-    def update_param(self, param, set_Tr=False, set_phase=False, set_wobs=False):
+    def update_param(self, param=None,
+                     set_Tr=False,
+                     set_phase=False,
+                     set_wobs=False,
+                     set_p_Ej2=False,
+                     set_grid=False):
         if param is None:
-            return
-
-        if not np.array_equal(param, self.pot_param):
+            if self.pot_param is None:
+                raise ValueError('The current param was not set.')
+        elif np.array_equal(param, self.pot_param):
+            pass
+        else:
             self.pot_param = param
             self.pot = self.pot_factory(*param)
             self.pot_util = PotUtility(self.rmin, self.rmax, self.pot)
             self.tracer.update_potential(self.pot_util)
-            self.tracer.integrate(set_Tr=set_Tr, set_phase=set_phase, set_wobs=set_wobs)
 
-    def _make_orbit_grid(self):
-        tracer = self.tracer
-        N_Ej2_interp = self.N_Ej2_interp
-        Emin = tracer.Emin
-        Emax = tracer.Emax + N_Ej2_interp.bandwidth * N_Ej2_interp.scale[0] * 2  # Emax + 2 * bandwidth
-        self.df_interp = DFInterpolator(Emin, Emax, self.pot_util, self.N_Ej2_interp)
+        if set_grid:
+            set_p_Ej2 = True
+        if set_p_Ej2:
+            set_Tr = True
 
-    def _make_N_Ej2_interp(self, **kde_opt):
-        """
-        kde_opt:
-            e.g., backend='sklearn', bw_factor=1, kernel='epanechnikov'
-        """
-        tracer = self.tracer
+        self.tracer.integrate(set_Tr=set_Tr, set_phase=set_phase, set_wobs=set_wobs)
 
-        data = np.stack([tracer.E, tracer.j2], axis=-1)
-        weights = tracer.wobs
-
-        self.N_Ej2_interp = KDE(
-            data, weights=weights,
-            boundary=[[tracer.Emin, None], [0, 1]], **kde_opt)
+        if set_p_Ej2:
+            self.tracer.make_N_Ej2_interp()
+        if set_grid:
+            self.tracer.make_orbit_grid()
 
     def lnp_emdf(self, param=None):
-        if param is not None:
-            self._update_param(param)
-            self._prepare_emdf()
+        self.update_param(param, set_Tr=True, set_p_Ej2=True)
 
         tracer = self.tracer
         Tr, L2_max = tracer.Tr, tracer.L2_max
         p_Ej = self.N_Ej2_interp.autopdf()
 
-        return np.log(p_Ej / Tr / L2_max).sum()
+        lnp = np.log(p_Ej / Tr / L2_max).sum()
+        return lnp
 
-    def lnp_opdf(self, param=None):
-        self._update_param(param)
-        nbin = int(max(round(np.log(self.ntracer)), 2))
-        rbin = np.linspace(self.rmin, self.rmax, nbin + 1)
+    def lnp_opdf(self, param=None, rbin=None):
+        """
+        rbin: None, int, or 1D float array
+            If None, log(ntracer) will be used.
+        """
+        self.update_param(param, set_phase=True)
+
+        if rbin is None:
+            rbin = int(max(round(np.log(self.tracer.n)), 2))
+        if np.isscalar(rbin):
+            rbin = np.linspace(self.rmin, self.rmax, rbin + 1)
+
+        rbin_current = getattr(self, '_opdf_rbin', None)
+        if not np.array_equal(rbin, rbin_current):
+            self._opdf_rbin = rbin
+            self._opdf_rcnt = np.histogram(np.self.tracer.rr, rbin)
+        rcnt = self._opdf_rcnt
+
         bincount = self.tracer.count_raidal_bin(rbin)
-        return self.integrator.likelihood(param, oPDF.Estimators.RBinLike)
+        bincount /= np.sum(bincount)
 
-    def lnp_AD(self, param=None):
+        lnp = multinomial.logpmf(rcnt, n=self.ntracer, p=bincount)
+        return lnp
+
+    def stats_AD(self, param=None):
+        """
+        Negative statistic returned for optimization procedure.
+        """
+        self._update_param(param, set_phase=True)
+
+        phase_abs = np.abs(self.tracer.phase) * 2
+        return -AndersonDarling_stat(phase_abs)
+
+    def stats_MeanPhase(self, param=None):
+        """
+        Negative statistic returned for optimization procedure.
+        """
         self._update_param(param)
-        return -self.integrator.likelihood(param, oPDF.Estimators.AD)
 
-    def lnp_MeanPhase(self, param=None):
-        self._update_param(param)
-        return -self.integrator.likelihood(param, oPDF.Estimators.MeanPhase)
+        phase_abs = np.abs(self.tracer.phase) * 2
+        return -MeanPhase_stat(phase_abs)
 
-        # self.pot = CubicSpline(r, p, bc_type='natural', extrapolate=False)
-        # self.dpot_dr = self.pot.derivative(1)
-        # def mass(self, r):
-        #     return r**2 * self.dpot_dr(r) / G
+
+def MeanPhase_stat(x):
+    "Normalized mean phase statistic"
+    n = x.size
+    return (np.mean(x, axis=1) - 0.5) * (12 * n)**0.5
+
+
+def AndersonDarling_stat(x, axis=None):
+    "Anderson Darling statistic"
+    n = len(x)
+    i = np.arange(n)
+    x = np.sort(x, axis=axis)
+    D = - n - np.mean((2 * i + 1) * np.log(x) + (2 * (n - i) - 1) * np.log(1 - x), axis=axis)
+    return D
+
+
+def AndersonDarling_prob(x):
+    "Approximate pdf for AD statistic (esp. for n >= 5 and p > 1e-3), see Han et al. 2016"
+    w, m1, s1, m2, s2 = 0.569, -0.570, 0.511, 0.227, 0.569
+    return normal(m1, s1).pdf(x) * w + normal(m2, s2).pdf(x) * (1 - w)
