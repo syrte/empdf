@@ -7,8 +7,6 @@ Author: Zhaozhou Li (lizz.astro@gmail.com)
 # os.environ["MKL_NUM_THREADS"] = "20"
 
 import numpy as np
-from oPDF import oPDF
-
 from handy import EqualGridInterpolator
 from scipy.interpolate import CubicSpline
 from scipy.special import roots_legendre
@@ -205,7 +203,7 @@ class Tracer:
         """
         rr, vv, vr, vt = decompose_r_v(self.r, self.v)
         K = 0.5 * vv**2
-        L = vr * rr
+        L = vt * rr
         L2 = L**2
         n = len(rr)
 
@@ -412,6 +410,7 @@ class Estimator:
 
         if rbin is None:
             rbin = int(max(round(np.log(self.tracer.n)), 2))
+
         if np.isscalar(rbin):
             rbin = np.linspace(self.rmin, self.rmax, rbin + 1)
 
@@ -426,6 +425,9 @@ class Estimator:
 
         lnp = multinomial.logpmf(rcnt, n=self.ntracer, p=bincount)
         return lnp
+
+    def lnp_opdf_smooth(self, param=None):
+        raise NotImplementedError
 
     def stats_AD(self, param=None):
         """
