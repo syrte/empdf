@@ -2,8 +2,10 @@
 Author: Zhaozhou Li (lizz.astro@gmail.com)
 
 KDE module.
+
+Notes.
 sklearn is about 3x faster than scipy.stats.gaussian_kde
-For very large dataset, FFTKDE might be useful, not implemented yet.
+For very large dataset, FFTKDE might be useful, not implemented yet. Check trial/empdf.py later.
 """
 
 import numpy as np
@@ -38,9 +40,13 @@ def MADN(x, axis=None, keepdims=False):
     The normalized median absolute deviation (MADN),
     a robust measure of scale that is more robust than IQR.
     See https://en.wikipedia.org/wiki/Robust_measures_of_scale
+
+    It is equivalent to scipy.stats.median_abs_deviation(x, axis=axis, scale='normal')
+    which is only available for scipy>=1.5.0
     """
+    scale = 0.6744897501960817  # special.ndtri(0.75)
     med = np.median(x, axis=axis, keepdims=True)
-    return np.median(np.abs(x - med), axis=axis, keepdims=keepdims) * 1.4826
+    return np.median(np.abs(x - med), axis=axis, keepdims=keepdims) / scale
 
 
 def boundary_reflex(x, boundary=None, c_contiguous=False):
@@ -63,15 +69,15 @@ def boundary_reflex(x, boundary=None, c_contiguous=False):
     n = 1000
     x = np.random.rand(n, 3)
     a = boundary_reflex(x, [[0, 1], [0], None])  # bounds: [0, 1]x[0, inf]x[-inf, inf]
-    assert a.shape == (6*n, 3)
+    assert a.shape == (6 * n, 3)
     assert np.array_equal(a[:n], x)
     plt.scatter(x.T[0], x.T[1])
     plt.scatter(a.T[0], a.T[1], s=5)
     """
-    n, d = x.shape
     if boundary is None:
         out = x
     else:
+        n, d = x.shape
         arr_list = [[] for i in range(d)]
         for i in range(d):
             xi = x[:, i]
@@ -124,8 +130,8 @@ class KDE:
         Examples
         --------
         data = np.stack([E, j2], axis=-1)
-        kde = KDE2D(data, weights=w, boundary=[[Emin, None], [0, 1]],
-                    backend='sklearn', kernel='epanechnikov')
+        kde = KDE(data, weights=w, boundary=[[Emin, None], [0, 1]],
+                  backend='sklearn', kernel='epanechnikov')
         """
         n, d = data.shape
 
@@ -209,3 +215,22 @@ class KDE:
             return self.pdf(self.data[:self.n])
         else:
             return self.pdf(self.data_scaled[:self.n], scaled=True)
+
+
+def test_compute_neff():
+    assert compute_neff(np.ones(100)) == 100
+    assert compute_neff(np.array([1, 1, 0])) == 2
+    assert compute_neff(np.array([0.5, 0.5, 0]), normed=True) == 2
+
+
+def test_scotts_factor():
+    assert np.allclose(scotts_factor(100, 1), 0.3981071705534972)
+    assert np.allclose(scotts_factor(100, 4), 0.5623413251903491)
+
+
+def test_MADN():
+    from numpy.random import default_rng
+    rng = default_rng(10)
+    vals = rng.standard_normal(1000)
+    assert np.allclose(MADN(vals), 0.997429417584344)
+    assert MADN(np.arange(50) / 50) == 0.3706505546264005
