@@ -259,17 +259,17 @@ cdef ndarray count_raidal_bin(Particle_t[:] parr, double[:] rbin, gsl_spline * p
                     if rmin < rmax:
                         gsl_integration_cquad(func, rmin, rmax, ABS_EPS, REL_EPS, workspace, t, NULL, NULL)
 
-                        omp.omp_set_lock(lock)
+                        omp.omp_set_lock(&lock)
                         bincount[j] += p.wgt * t[0] / p.Tr
-                        omp.omp_unset_lock(lock)
+                        omp.omp_unset_lock(&lock)
 
             elif rmin == rmax:
                 # circular orbit
                 j = gsl_interp_accel_find(spl_acc, &rbin[0], nbin + 1, rmin)
 
-                omp.omp_set_lock(lock)
+                omp.omp_set_lock(&lock)
                 bincount[j] += p.wgt
-                omp.omp_unset_lock(lock)
+                omp.omp_unset_lock(&lock)
 
         gsl_interp_accel_free(spl_acc)
         gsl_integration_cquad_workspace_free(workspace)
