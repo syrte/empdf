@@ -105,6 +105,7 @@ kernel_var_dict = dict(
     linear=1 / 6,
     epanechnikov=1 / 5,
     normal=1,
+    gaussian=1,
     cosine=1 - 8 / np.pi**2
 )
 
@@ -112,26 +113,35 @@ kernel_var_dict = dict(
 class KDE:
     N_BIN_FFT = 100
 
-    def __init__(self, data, weights=None, boundary=None,
-                 backend='sklearn', bw_factor=1, kernel='epanechnikov', **options):
+    def __init__(self, data, weights=None, bw_factor=1, boundary=None,
+                 backend='sklearn', kernel='epanechnikov', **options):
         """
         Parameters
         ----------
         data: shape (n, d)
         weights: shape (n,)
+            Data and weights.
+        bw_factor:
+            bandwidth = Scott's rule * bw_factor for scaled data
         boundary: None or shape (d, 2)
             If not None, reflex boundary correction is used for each axis.
         backend: ['scipy', 'sklearn', 'KDEpy.FFTKDE', 'KDEpy.TreeKDE']
-        bw_factor:
-            bandwidth = Scott's rule * bw_factor
+            Backend to use.
+        kernel:
+            Supported kernels:
+            sklearn: epanechnikov, gaussian, cosine, linear, tophat
+            KDEpy: epa, gaussian, cosine, ...
+            scipy backend always uses gaussian kernel, hence ignoring this option.
         options:
-            sklearn: kernel='epanechnikov'
+            See docs of corresponding backend.
 
         Examples
         --------
         data = np.stack([E, j2], axis=-1)
         kde = KDE(data, weights=w, boundary=[[Emin, None], [0, 1]],
                   backend='sklearn', kernel='epanechnikov')
+
+        The original data is stored as kde.data[:kde.n].
         """
         n, d = data.shape
 
@@ -142,9 +152,10 @@ class KDE:
             assert weights.shape == (n,), "incorrect `weights` shape!"
             weights = weights / np.sum(weights)
             neff = compute_neff(weights, normed=True)
+
         bandwidth = scotts_factor(neff, d=d) * bw_factor
 
-        # reflect to reduce bias at boundary
+        # reflect data for boundary correction
         if boundary is not None:
             assert len(boundary) == d, "incorrect `boundary` shape!"
             data = boundary_reflex(data, boundary=boundary)
@@ -157,8 +168,7 @@ class KDE:
 
         # calculate scale; scipy has its own scale
         if backend != 'scipy':
-            # use the original n points for scale
-            scale = MADN(data[:n], axis=0)
+            scale = MADN(data[:n], axis=0)  # use the original n points for scale
             pdf_scale = np.prod(scale)
             data_scaled = data / scale
 
@@ -167,54 +177,79 @@ class KDE:
             from scipy.stats import gaussian_kde
 
             # initialize with the original n points for covariance matrix
-            # this modified kde object is only designed for calling kde.pdf and kde.logpdf
-            kde = gaussian_kde(data[:n].T, weights=weights[:n], bw_method=bandwidth)
-            kde.dataset = data.T
-            kde.n = len(data)
+            # this modified _kde object is only designed for calling _kde.pdf and _kde.logpdf
             if weights is None:
-                kde._weights = np.ones(kde.n) / kde.n
+                _kde = gaussian_kde(data[:n].T, bw_method=bandwidth)
             else:
-                kde._weights = weights / nrep  # normalized to 1
+                _kde = gaussian_kde(data[:n].T, bw_method=bandwidth, weights=weights[:n])
 
-        if backend == 'sklearn':
+            _kde.dataset = data.T
+            _kde.n = len(data)
+            if weights is None:
+                _kde._weights = np.ones(_kde.n) / _kde.n
+            else:
+                _kde._weights = weights / nrep  # normalized to 1
+
+            kernel = 'gaussian'
+
+        elif backend == 'sklearn':
             from sklearn.neighbors import KernelDensity
 
             options.setdefault('rtol', 1e-6)
             bw_normed = bandwidth / kernel_var_dict[kernel]**0.5  # normalize kernels to var = 1
-            kde = KernelDensity(kernel=kernel, bandwidth=bw_normed, **options)
-            kde.fit(data_scaled, sample_weight=weights)
+
+            _kde = KernelDensity(kernel=kernel, bandwidth=bw_normed, **options)
+            _kde.fit(data_scaled, sample_weight=weights)
 
         elif backend == 'KDEpy.FFTKDE' or backend == 'KDEpy.TreeKDE':
             raise NotImplementedError
 
         ldict = locals()
-        for key in ['kde', 'data', 'weights', 'boundary', 'backend', 'n', 'nrep',
-                    'scale', 'pdf_scale', 'data_scaled', 'bandwidth']:
+        for key in ['_kde', 'data', 'weights', 'boundary', 'backend', 'kernel', 'bandwidth',
+                    'n', 'd', 'nrep', 'scale', 'pdf_scale', 'data_scaled']:
             if key in ldict:
                 setattr(self, key, ldict[key])
 
-    def pdf(self, data, scaled=False):
+    def pdf(self, data, log=False, scaled=False):
         """
         data: shape (n, d)
+        log: bool
+            If return p or lnp.
+        scaled: bool
+            Option for autopdf only.
         """
         if self.backend == 'scipy':
-            return self.nrep * self.kde.pdf(data.T)
+            if scaled:
+                raise ValueError('input data is not supposed to be scaled')
+            p = self.nrep * self._kde.pdf(data.T)
+
+            if log:
+                return np.log(p)
+            else:
+                return p
 
         elif self.backend == 'sklearn':
             if scaled:
-                lnp = self.kde.score_samples(data)
+                lnp = self._kde.score_samples(data)
             else:
-                lnp = self.kde.score_samples(data / self.scale)
-            return self.nrep / self.pdf_scale * np.exp(lnp)
+                lnp = self._kde.score_samples(data / self.scale)
 
-        else:
+            if log:
+                return np.log(self.nrep / self.pdf_scale) + lnp
+            else:
+                return (self.nrep / self.pdf_scale) * np.exp(lnp)
+
+        elif self.backend == 'KDEpy.FFTKDE' or self.backend == 'KDEpy.TreeKDE':
             raise NotImplementedError
 
-    def autopdf(self):
+    def autopdf(self, log=False):
+        """
+        Calculate the pdf of the underlying data points.
+        """
         if self.backend == 'scipy':
-            return self.pdf(self.data[:self.n])
+            return self.pdf(self.data[:self.n], log=log, scaled=False)
         else:
-            return self.pdf(self.data_scaled[:self.n], scaled=True)
+            return self.pdf(self.data_scaled[:self.n], log=log, scaled=True)
 
 
 def test_compute_neff():
