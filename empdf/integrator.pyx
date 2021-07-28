@@ -11,7 +11,7 @@ from libc.math cimport pi, sqrt, isnan, isinf, isfinite, fmax, fmin
 from libc.time cimport time
 
 from cython.parallel cimport parallel, prange
-from openmp cimport omp_get_thread_num
+cimport openmp as omp
 
 
 # cdef:
@@ -35,12 +35,12 @@ cdef packed struct Particle_t:
     double r         # current position
     double rmin      # orbit limits
     double rmax      # orbit limits
-    double Tr        # rmin->rmax_val
+    double Tr        # rmin->rmax_val, half radial period
     double Tr_cur    # [opt] rmin->r
     double rmin_obs  # [opt] observable range
     double rmax_obs  # [opt] specified by observation
     double Tr_obs    # [opt] rmin_obs->rmax_obs
-    double wgt       # [opt] weight of the orbit, should be 1 by default
+    double wgt       # [opt] weight of the orbit, should be 1 by default, used in count_raidal_bin
 
 
 cdef packed struct Orbit_t:
@@ -166,7 +166,7 @@ cdef void compute_radial_period(Particle_t[:] parr, gsl_spline * potential,
         func.params = orbit
         orbit.potential = potential
         orbit.spl_acc = spl_acc
-        gsl_rng_set(rng, omp_get_thread_num() << 16 + time(NULL))
+        gsl_rng_set(rng, omp.omp_get_thread_num() << 16 + time(NULL))
 
         for i in prange(n):
             p = &parr[i]
@@ -226,6 +226,9 @@ cdef ndarray count_raidal_bin(Particle_t[:] parr, double[:] rbin, gsl_spline * p
         Orbit_t * orbit
         double * t
 
+    cdef omp.omp_lock_t lock
+    omp.omp_init_lock(&lock)
+
     with nogil, parallel():
         spl_acc = gsl_interp_accel_alloc()  # workspace for interp lookups
         workspace = gsl_integration_cquad_workspace_alloc(MAX_INTVAL)
@@ -255,18 +258,26 @@ cdef ndarray count_raidal_bin(Particle_t[:] parr, double[:] rbin, gsl_spline * p
                     rmax = fmin(p.rmax, rbin[j + 1])
                     if rmin < rmax:
                         gsl_integration_cquad(func, rmin, rmax, ABS_EPS, REL_EPS, workspace, t, NULL, NULL)
+
+                        omp.omp_set_lock(lock)
                         bincount[j] += p.wgt * t[0] / p.Tr
+                        omp.omp_unset_lock(lock)
 
             elif rmin == rmax:
                 # circular orbit
                 j = gsl_interp_accel_find(spl_acc, &rbin[0], nbin + 1, rmin)
+
+                omp.omp_set_lock(lock)
                 bincount[j] += p.wgt
+                omp.omp_unset_lock(lock)
 
         gsl_interp_accel_free(spl_acc)
         gsl_integration_cquad_workspace_free(workspace)
         free(func)
         free(orbit)
         free(t)
+
+    omp.omp_destroy_lock(&lock)
 
     return bincount.base
 
