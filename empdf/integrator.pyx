@@ -212,10 +212,10 @@ cdef void compute_radial_period(Particle_t[:] parr, gsl_spline * potential,
 
 cdef ndarray count_raidal_bin(Particle_t[:] parr, double[:] rbin, gsl_spline * potential):
     cdef:
-        int i, j, j0, j1, n = len(parr), nbin = len(rbin) - 1
+        int i, j, j0, j1, n = len(parr), nbin = len(rbin)
         Particle_t * p
         double rmin, rmax
-        double[:] bincount = np.zeros(nbin, dtype='f8')
+        double[:] bincount = np.zeros(nbin - 1, dtype='f8')
 
         int MAX_INTVAL = 1000
         double REL_EPS = 1e-6, ABS_EPS = 0
@@ -247,11 +247,11 @@ cdef ndarray count_raidal_bin(Particle_t[:] parr, double[:] rbin, gsl_spline * p
             orbit.L2 = p.L2
 
             rmin = fmax(p.rmin, rbin[0])
-            rmax = fmin(p.rmax, rbin[nbin])
+            rmax = fmin(p.rmax, rbin[nbin - 1])
 
             if rmin < rmax:
-                j0 = gsl_interp_accel_find(spl_acc, &rbin[0], nbin + 1, rmin)
-                j1 = gsl_interp_accel_find(spl_acc, &rbin[0], nbin + 1, rmax)
+                j0 = gsl_interp_accel_find(spl_acc, &rbin[0], nbin, rmin)
+                j1 = gsl_interp_accel_find(spl_acc, &rbin[0], nbin, rmax)
 
                 for j in range(j0, j1):
                     rmin = fmax(p.rmin, rbin[j])
@@ -265,7 +265,7 @@ cdef ndarray count_raidal_bin(Particle_t[:] parr, double[:] rbin, gsl_spline * p
 
             elif rmin == rmax:
                 # circular orbit
-                j = gsl_interp_accel_find(spl_acc, &rbin[0], nbin + 1, rmin)
+                j = gsl_interp_accel_find(spl_acc, &rbin[0], nbin, rmin)
 
                 omp.omp_set_lock(&lock)
                 bincount[j] += p.wgt
