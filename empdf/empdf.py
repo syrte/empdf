@@ -20,7 +20,7 @@ import cyper
 import cython_gsl
 
 pyx = cyper.inline(
-    open('./integrator.pyx').read(),
+    './integrator.pyx',
     include_dirs=[cython_gsl.get_include(), np.get_include()],
     library_dirs=[cython_gsl.get_library_dir()],
     cimport_dirs=[cython_gsl.get_cython_include_dir()],
