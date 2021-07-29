@@ -220,6 +220,7 @@ cdef ndarray count_raidal_bin(Particle_t[:] parr, double[:] rbin, gsl_spline * p
         int MAX_INTVAL = 1000
         double REL_EPS = 1e-6, ABS_EPS = 0
 
+        gsl_interp_accel * bin_acc
         gsl_interp_accel * spl_acc
         gsl_integration_cquad_workspace * workspace
         gsl_function * func
@@ -230,6 +231,7 @@ cdef ndarray count_raidal_bin(Particle_t[:] parr, double[:] rbin, gsl_spline * p
     omp.omp_init_lock(&lock)
 
     with nogil, parallel():
+        bin_acc = gsl_interp_accel_alloc()  # workspace for binary search
         spl_acc = gsl_interp_accel_alloc()  # workspace for interp lookups
         workspace = gsl_integration_cquad_workspace_alloc(MAX_INTVAL)
         func = <gsl_function *> malloc(sizeof(gsl_function))
@@ -250,10 +252,10 @@ cdef ndarray count_raidal_bin(Particle_t[:] parr, double[:] rbin, gsl_spline * p
             rmax = fmin(p.rmax, rbin[nbin - 1])
 
             if rmin < rmax:
-                j0 = gsl_interp_accel_find(spl_acc, &rbin[0], nbin, rmin)
-                j1 = gsl_interp_accel_find(spl_acc, &rbin[0], nbin, rmax)
+                j0 = gsl_interp_accel_find(bin_acc, &rbin[0], nbin, rmin)
+                j1 = gsl_interp_accel_find(bin_acc, &rbin[0], nbin, rmax)  # rbin[j1+1] is secured
 
-                for j in range(j0, j1):
+                for j in range(j0, j1 + 1):
                     rmin = fmax(p.rmin, rbin[j])
                     rmax = fmin(p.rmax, rbin[j + 1])
                     if rmin < rmax:
@@ -265,12 +267,13 @@ cdef ndarray count_raidal_bin(Particle_t[:] parr, double[:] rbin, gsl_spline * p
 
             elif rmin == rmax:
                 # circular orbit
-                j = gsl_interp_accel_find(spl_acc, &rbin[0], nbin, rmin)
+                j = gsl_interp_accel_find(bin_acc, &rbin[0], nbin, rmin)
 
                 omp.omp_set_lock(&lock)
                 bincount[j] += p.wgt
                 omp.omp_unset_lock(&lock)
 
+        gsl_interp_accel_free(bin_acc)
         gsl_interp_accel_free(spl_acc)
         gsl_integration_cquad_workspace_free(workspace)
         free(func)
