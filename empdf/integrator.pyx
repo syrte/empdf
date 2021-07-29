@@ -14,14 +14,9 @@ from cython.parallel cimport parallel, prange
 cimport openmp as omp
 
 
-# cdef:
-#     struct Precision_t:
-#         double REL_EPS_rlim
-#         double ABS_EPS_rlim
-#         double REL_EPS_Tr
-#         double ABS_EPS_Tr
-#     Precision_t eps
-
+cdef:
+    int MAX_ITER = 100
+    int MAX_INTV = 1000
 
 Particle_dtype = np.dtype({
     'formats': ['f8'] * 11,
@@ -65,20 +60,18 @@ cdef double f_vr_inv(double r, void * params) nogil:
         Orbit_t * orbit = <Orbit_t *> params
         double vr2 = 2 * (orbit.E - gsl_spline_eval(orbit.potential, r, orbit.spl_acc)) - orbit.L2 / (r * r)
 
-    if vr2 <= 0.:
-        return 0.
-    else:
+    if vr2 > 0.:
         return 1. / sqrt(vr2)
+    else:
+        return 0.
 
 
-cdef void solve_radial_limits(Particle_t[:] parr, double rmin, double rmax, gsl_spline * potential) nogil:
+cdef void solve_radial_limits(Particle_t[:] parr, gsl_spline * potential, double rmin, double rmax,
+                              double epsrel=1e-6, double epsabs=0.) nogil:
     cdef:
         int i, j, n = len(parr)
         Particle_t * p
         double rt, x_lo, x_hi
-
-        int MAX_ITER = 100
-        double REL_EPS = 1e-6, ABS_EPS = 0
 
         gsl_interp_accel * spl_acc
         gsl_root_fsolver * solver
@@ -113,7 +106,7 @@ cdef void solve_radial_limits(Particle_t[:] parr, double rmin, double rmax, gsl_
                     rt = gsl_root_fsolver_root(solver)
                     x_lo = gsl_root_fsolver_x_lower(solver)
                     x_hi = gsl_root_fsolver_x_upper(solver)
-                    if (x_hi - x_lo) <= REL_EPS * x_lo + ABS_EPS:
+                    if (x_hi - x_lo) <= epsrel * x_hi + epsabs:
                         break
                 p.rmin = x_hi  # instead of rt to avoid negative vr2
             else:
@@ -126,7 +119,7 @@ cdef void solve_radial_limits(Particle_t[:] parr, double rmin, double rmax, gsl_
                     rt = gsl_root_fsolver_root(solver)
                     x_lo = gsl_root_fsolver_x_lower(solver)
                     x_hi = gsl_root_fsolver_x_upper(solver)
-                    if (x_hi - x_lo) <= REL_EPS * x_lo + ABS_EPS:
+                    if (x_hi - x_lo) <= epsrel * x_lo + epsabs:
                         break
                 p.rmax = x_lo  # instead of rt to avoid negative vr2
             else:
@@ -139,15 +132,13 @@ cdef void solve_radial_limits(Particle_t[:] parr, double rmin, double rmax, gsl_
 
 
 cdef void compute_radial_period(Particle_t[:] parr, gsl_spline * potential,
-                                bint set_t, bint set_tcur, bint set_tobs) nogil:
+                                bint set_t, bint set_tcur, bint set_tobs,
+                                double epsrel=1e-6, double epsabs=0.) nogil:
     cdef:
         int i, j, n = len(parr)
         Particle_t * p
         double rmin, rmax, t
         double pderiv, pderiv2  # 1st, 2nd derivatives of potential
-
-        int MAX_INTVAL = 1000
-        double REL_EPS = 1e-6, ABS_EPS = 0
 
         gsl_interp_accel * spl_acc
         gsl_integration_cquad_workspace * workspace
@@ -157,7 +148,7 @@ cdef void compute_radial_period(Particle_t[:] parr, gsl_spline * potential,
 
     with nogil, parallel():
         spl_acc = gsl_interp_accel_alloc()  # workspace for interp lookups
-        workspace = gsl_integration_cquad_workspace_alloc(MAX_INTVAL)
+        workspace = gsl_integration_cquad_workspace_alloc(MAX_INTV)
         func = <gsl_function *> malloc(sizeof(gsl_function))
         orbit = <Orbit_t *> malloc(sizeof(Orbit_t))
         rng = gsl_rng_alloc(gsl_rng_default)
@@ -175,14 +166,14 @@ cdef void compute_radial_period(Particle_t[:] parr, gsl_spline * potential,
 
             if p.rmin < p.rmax:
                 if set_t:
-                    gsl_integration_cquad(func, p.rmin, p.rmax, ABS_EPS, REL_EPS, workspace, &p.Tr, NULL, NULL)
+                    gsl_integration_cquad(func, p.rmin, p.rmax, epsabs, epsrel, workspace, &p.Tr, NULL, NULL)
                 if set_tcur:
-                    gsl_integration_cquad(func, p.rmin, p.r, ABS_EPS, REL_EPS, workspace, &p.Tr_cur, NULL, NULL)
+                    gsl_integration_cquad(func, p.rmin, p.r, epsabs, epsrel, workspace, &p.Tr_cur, NULL, NULL)
                 if set_tobs:
                     rmin = fmax(p.rmin, p.rmin_obs)
                     rmax = fmin(p.rmax, p.rmax_obs)
                     if rmin < rmax:
-                        gsl_integration_cquad(func, rmin, rmax, ABS_EPS, REL_EPS, workspace, &p.Tr_obs, NULL, NULL)
+                        gsl_integration_cquad(func, rmin, rmax, epsabs, epsrel, workspace, &p.Tr_obs, NULL, NULL)
                     else:
                         p.Tr_obs = 0.  # this should never happen!
 
@@ -207,18 +198,16 @@ cdef void compute_radial_period(Particle_t[:] parr, gsl_spline * potential,
 
     # Notes
     # we know Δvr^2 ~ Δr at rlims=[rmin, rmax], which allows more efficient algorithm?
-    # e.g. gsl_integration_qagp(func, rlims, 2, ABS_EPS, REL_EPS, ...)
+    # e.g. gsl_integration_qagp(func, rlims, 2, epsabs, epsrel, ...)
 
 
-cdef ndarray count_raidal_bin(Particle_t[:] parr, double[:] rbin, gsl_spline * potential):
+cdef ndarray count_raidal_bin(Particle_t[:] parr, gsl_spline * potential, double[:] rbin,
+                              double epsrel=1e-6, double epsabs=0.):
     cdef:
         int i, j, j0, j1, n = len(parr), nbin = len(rbin)
         Particle_t * p
         double rmin, rmax
         double[:] bincount = np.zeros(nbin - 1, dtype='f8')
-
-        int MAX_INTVAL = 1000
-        double REL_EPS = 1e-6, ABS_EPS = 0
 
         gsl_interp_accel * bin_acc
         gsl_interp_accel * spl_acc
@@ -233,7 +222,7 @@ cdef ndarray count_raidal_bin(Particle_t[:] parr, double[:] rbin, gsl_spline * p
     with nogil, parallel():
         bin_acc = gsl_interp_accel_alloc()  # workspace for binary search
         spl_acc = gsl_interp_accel_alloc()  # workspace for interp lookups
-        workspace = gsl_integration_cquad_workspace_alloc(MAX_INTVAL)
+        workspace = gsl_integration_cquad_workspace_alloc(MAX_INTV)
         func = <gsl_function *> malloc(sizeof(gsl_function))
         orbit = <Orbit_t *> malloc(sizeof(Orbit_t))
         t = <double *> malloc(sizeof(double))
@@ -259,7 +248,7 @@ cdef ndarray count_raidal_bin(Particle_t[:] parr, double[:] rbin, gsl_spline * p
                     rmin = fmax(p.rmin, rbin[j])
                     rmax = fmin(p.rmax, rbin[j + 1])
                     if rmin < rmax:
-                        gsl_integration_cquad(func, rmin, rmax, ABS_EPS, REL_EPS, workspace, t, NULL, NULL)
+                        gsl_integration_cquad(func, rmin, rmax, epsabs, epsrel, workspace, t, NULL, NULL)
 
                         omp.omp_set_lock(&lock)
                         bincount[j] += p.wgt * t[0] / p.Tr
@@ -324,24 +313,25 @@ cdef class Integrator:
         self.r = r
         self.U = U
 
-    def solve_radial_limits(self):
+    def solve_radial_limits(self, double epsrel=1e-6, double epsabs=0.):
         """
         solve rmin and rmax and store them in parr
         rmin = max(rmin, rper)
         rmax = min(rmax, rapo)
         """
-        solve_radial_limits(self.parr, self.rmin, self.rmax, self.potential)
+        solve_radial_limits(self.parr, self.potential, self.rmin, self.rmax, epsrel, epsabs)
 
-    def compute_radial_period(self, bint set_t=True, bint set_tcur=False, bint set_tobs=False):
+    def compute_radial_period(self, bint set_t=True, bint set_tcur=False, bint set_tobs=False, 
+                              double epsrel=1e-6, double epsabs=0.):
         """
         set_tcur: calculate the time from rmin to r
         set_tobs: calculate the time from rmin_obs, rmax_obs
         """
-        compute_radial_period(self.parr, self.potential, set_t=set_t, set_tcur=set_tcur, set_tobs=set_tobs)
+        compute_radial_period(self.parr, self.potential, set_t, set_tcur, set_tobs, epsrel, epsabs)
 
-    def count_raidal_bin(self, double[:] rbin):
+    def count_raidal_bin(self, double[:] rbin, double epsrel=1e-6, double epsabs=0.):
         """
-        calculate the expected radial bin count
+        calculate the time-average radial bin count
         """
-        bincount = count_raidal_bin(self.parr, rbin, self.potential)
+        bincount = count_raidal_bin(self.parr, self.potential, rbin, epsrel, epsabs)
         return bincount
