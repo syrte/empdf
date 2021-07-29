@@ -17,6 +17,7 @@ cimport openmp as omp
 cdef:
     int MAX_ITER = 100
     int MAX_INTV = 1000
+    double TOL_CIRC = 1 - 1e-5  # treat rmin/rmax > TOL_CIRC as circular orbit
 
 Particle_dtype = np.dtype({
     'formats': ['f8'] * 11,
@@ -164,7 +165,7 @@ cdef void compute_radial_period(Particle_t[:] parr, gsl_spline * potential,
             orbit.E = p.E
             orbit.L2 = p.L2
 
-            if p.rmin < p.rmax:
+            if p.rmin < p.rmax * TOL_CIRC:
                 if set_t:
                     gsl_integration_cquad(func, p.rmin, p.rmax, epsabs, epsrel, workspace, &p.Tr, NULL, NULL)
                 if set_tcur:
@@ -175,13 +176,13 @@ cdef void compute_radial_period(Particle_t[:] parr, gsl_spline * potential,
                     if rmin < rmax:
                         gsl_integration_cquad(func, rmin, rmax, epsabs, epsrel, workspace, &p.Tr_obs, NULL, NULL)
                     else:
-                        p.Tr_obs = 0.  # this should never happen!
+                        p.Tr_obs = 0.  # this should never happen! no overlap between rlim and rlim_obs
 
             else:
                 # it seems very close to circular orbit
                 pderiv = gsl_spline_eval_deriv(potential, p.r, spl_acc)
                 pderiv2 = gsl_spline_eval_deriv2(potential, p.r, spl_acc)
-                t = 2 * pi * sqrt(p.r / (3 * pderiv + p.r * pderiv2))
+                t = pi * sqrt(p.r / (3 * pderiv + p.r * pderiv2))  # half radial period!
 
                 if set_t:
                     p.Tr = t
@@ -240,7 +241,7 @@ cdef ndarray count_raidal_bin(Particle_t[:] parr, gsl_spline * potential, double
             rmin = fmax(p.rmin, rbin[0])
             rmax = fmin(p.rmax, rbin[nbin - 1])
 
-            if rmin < rmax:
+            if rmin < rmax * TOL_CIRC:
                 j0 = gsl_interp_accel_find(bin_acc, &rbin[0], nbin, rmin)
                 j1 = gsl_interp_accel_find(bin_acc, &rbin[0], nbin, rmax)  # rbin[j1+1] is secured
 
@@ -254,13 +255,16 @@ cdef ndarray count_raidal_bin(Particle_t[:] parr, gsl_spline * potential, double
                         bincount[j] += p.wgt * t[0] / p.Tr
                         omp.omp_unset_lock(&lock)
 
-            elif rmin == rmax:
+            elif rmin <= rmax:
                 # circular orbit
                 j = gsl_interp_accel_find(bin_acc, &rbin[0], nbin, rmin)
 
                 omp.omp_set_lock(&lock)
                 bincount[j] += p.wgt
                 omp.omp_unset_lock(&lock)
+
+            else:
+                pass  # this may happen! no overlap between rlim and rbin
 
         gsl_interp_accel_free(bin_acc)
         gsl_interp_accel_free(spl_acc)
