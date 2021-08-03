@@ -7,6 +7,8 @@ from numpy cimport ndarray
 from cython_gsl cimport *
 
 from libc.stdlib cimport malloc, free
+from libc.string cimport memcpy
+
 from libc.math cimport pi, sqrt, isnan, isinf, isfinite, fmax, fmin
 from libc.time cimport time
 
@@ -17,7 +19,7 @@ cimport openmp as omp
 cdef:
     int MAX_ITER = 100
     int MAX_INTV = 1000
-    double TOL_CIRC = 1 - 1e-5  # treat rmin/rmax > TOL_CIRC as circular orbit
+    double TOL_CIRC = 1 - 1e-3  # treat rmin/rmax > TOL_CIRC as circular orbit
 
 Particle_dtype = np.dtype({
     'formats': ['f8'] * 11,
@@ -299,16 +301,19 @@ cdef class Integrator:
         self.rmin = rmin
         self.rmax = rmax
 
-    def set_potential(self, double[:] r, double[:] U):
+    def set_potential(self, double[:] r, double[:] U, double[:, ::1] c=None):
         """
         update potential with radius and potential array
+        c = scipy.interpolate.CubicSpline(r, U).c[1]
         """
         cdef:
-            int n = len(r)
-            gsl_spline * potential = gsl_spline_alloc(gsl_interp_cspline, n)
-            # Cubic spline with natural boundary conditions
+            gsl_spline * potential
 
-        gsl_spline_init(potential, &r[0], &U[0], n)
+        assert r.size == U.size
+        if c is not None:
+            assert c.shape[0] == 4 and c.shape[1] == r.size - 1
+
+        potential = cspline_sp2gsl(r, U, c)
 
         if self.potential != NULL:
             gsl_spline_free(self.potential)
@@ -339,3 +344,58 @@ cdef class Integrator:
         """
         bincount = count_raidal_bin(self.parr, self.potential, rbin, epsrel, epsabs)
         return bincount
+
+
+# -----------------
+cdef struct gsl_spline_t:
+    gsl_interp_t *interp
+    double *x
+    double *y
+    size_t  size
+
+cdef struct gsl_interp_t:
+    const gsl_interp_type *type
+    double  xmin
+    double  xmax
+    size_t  size
+    cspline_state_t *state
+
+cdef struct cspline_state_t:
+    double *c
+    double *g
+    double *diag
+    double *offdiag
+
+
+cdef gsl_spline *cspline_sp2gsl(double[:] x, double[:] y, double[:, ::1] c=None) nogil:
+    '''
+    c = scipy.interpolate.CubicSpline(x, y).c
+    '''
+    cdef:
+        int n = len(x)
+        gsl_spline *spline
+        gsl_spline_t *spl
+
+    with gil:
+        assert (y.shape[0] == n)
+        if c is not None:
+            assert (c.shape[0] == 4) and (c.shape[1] == n - 1)
+
+    spline = gsl_spline_alloc(gsl_interp_cspline, n)
+
+    if c is not None:
+        spl = <gsl_spline_t *> spline
+        # need this conversion because cython_gsl does not provide complete struct member info
+
+        spl.interp.xmin = x[0]
+        spl.interp.xmax = x[n - 1]
+        memcpy(spl.x, &x[0], n * sizeof(double))
+        memcpy(spl.y, &y[0], n * sizeof(double))
+
+        memcpy(spl.interp.state.c, &c[1, 0], (n - 1) * sizeof(double))
+        spl.interp.state.c[n - 1] = c[1, n - 2] + 3 * c[0, n - 2] * (x[n - 1] - x[n - 2])
+
+    else:
+        gsl_spline_init(spline, &x[0], &y[0], n)
+
+    return spline
