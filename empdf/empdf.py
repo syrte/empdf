@@ -10,8 +10,7 @@ import numpy as np
 from handy import EqualGridInterpolator
 from scipy.interpolate import CubicSpline
 from scipy.special import roots_legendre
-from scipy.stats import multinomial
-from scipy.stats import norm as normal
+from scipy import stats
 
 from .kde import KDE
 
@@ -24,7 +23,7 @@ pyx = cyper.inline(
     include_dirs=[cython_gsl.get_include(), np.get_include()],
     library_dirs=[cython_gsl.get_library_dir()],
     cimport_dirs=[cython_gsl.get_cython_include_dir()],
-    cythonize_args={'language_level': '3'},
+    directives={'language_level': '3', 'cdivision': True},
     libraries=['gsl', 'gslcblas', 'm'],
     openmp='-fopenmp',
     fast_indexing=True,
@@ -34,7 +33,7 @@ Particle_dtype = pyx.Particle_dtype
 
 
 # -----------------------------------------------
-def _setattr_dict(obj, var_dict, var_list=None):
+def set_attrs(obj, var_dict, var_list=None):
     """
     Set attrs of obj by given dict, skipping 'self'
     """
@@ -46,8 +45,25 @@ def _setattr_dict(obj, var_dict, var_list=None):
             setattr(obj, key, var_dict[key])
 
 
-class Status:
-    pass
+# -----------------------------------------------
+# TODO
+
+def set_opt(**args):
+    global options
+    options.update(**args)
+
+
+options_default = dict(
+    N_RBIN_I=1001,
+    N_EBIN_I=100,  # interpolator for DF(E, j2)
+    N_JBIN_I=100,  # interpolator for DF(E, j2)
+    N_RBIN_R=50,
+    N_VBIN_R=50,  # quadrature grids for rho(r)
+    N_CBIN_R=50,  # quadrature grids for rho(r)
+)
+
+options = dict()
+set_opt(options_default)
 
 
 # -----------------------------------------------
@@ -64,21 +80,46 @@ def decompose_r_v(r, v):
     return rr, vv, vr, vt
 
 
+class Status:
+    """
+    status flag for updating parameters
+    """
+    pass
+
+
+def make_grid(rmin, rmax, n, dr=None):
+    """
+    make interpolating grids
+    """
+    if dr is None:
+        dr = 0.5 * (1 - np.cos(0.5 * np.pi / n)) * (rmax - rmin)
+
+    r = np.logspace(np.log10(rmin + dr), np.log10(rmax + dr), n - 2) - dr
+    dr1 = r[1] - r[0]
+    dr2 = r[-1] - r[-2]
+
+    r = np.hstack([rmin, rmin + 1e-2 * dr1, r[1:-1], rmax - 1e-2 * dr2, rmax])
+    return r
+
 # -----------------------------------------------
+
+
 class PotUtility:
-    N_RBIN_I = 1001
+    N_RBIN_I = 501
 
     def __init__(self, rmin, rmax, pot):
         """
         pot: potential object with callable '.potential' and (optional) '.mass'
         """
-        r = np.linspace(rmin, rmax, self.N_RBIN_I)
+        # r = np.linspace(rmin, rmax, self.N_RBIN_I)
+        r = make_grid(rmin, rmax, self.N_RBIN_I)
         U = pot.potential(r)
+        interp_pot = CubicSpline(r, U, extrapolate=False)
 
         if hasattr(pot, 'mass'):
             GM = pot.mass(r)
         else:
-            GM = CubicSpline(r, U).derivative()(r) * r**2
+            GM = interp_pot.derivative()(r) * r**2
             # dU/dr=GM/r^2 => GM = r^2 dU/dr
 
         E_cir = 0.5 * GM / r + U
@@ -88,9 +129,12 @@ class PotUtility:
         interp_lnr_cir = CubicSpline(E_cir, np.log(r), extrapolate=False)
 
         integrator = Integrator()
-        integrator.set_potential(r, U)
+        integrator.set_potential(r, U, interp_pot.c)
 
-        _setattr_dict(self, locals())
+        set_attrs(self, locals())
+
+    def __call__(self, r):
+        return self.interp_pot(r)
 
     def L2_max(self, E, return_r=False):
         """
@@ -112,11 +156,6 @@ class PotUtility:
             return L2_max, r
         else:
             return L2_max
-
-    # self.pot = CubicSpline(r, p, bc_type='natural', extrapolate=False)
-    # self.dpot_dr = self.pot.derivative(1)
-    # def mass(self, r):
-    #     return r**2 * self.dpot_dr(r) / G
 
 
 class DFInterpolator:
@@ -173,7 +212,8 @@ class DFInterpolator:
         return self.f_Ej2([E, j2])
 
     def _prepare_pdf(self):
-        r = np.linspace(self.rmin, self.rmax, self.N_RBIN_R).reshape(-1, 1, 1)
+        # r = np.linspace(self.rmin, self.rmax, self.N_RBIN_R).reshape(-1, 1, 1)
+        r = make_grid(self.rmin, self.rmax, self.N_RBIN_R).reshape(-1, 1, 1)
         U = self.pot_util(r)
         vmax = (2 * (self.E_max - U))**0.5  # shape (nr, 1, 1)
 
@@ -230,7 +270,7 @@ class Tracer:
 
         stale = Status()  # status flags
 
-        _setattr_dict(self, locals())
+        set_attrs(self, locals())
 
     def update_potential(self, pot_util):
         # pot_util = PotUtility(self.rmin, self.rmax, pot)
@@ -241,7 +281,7 @@ class Tracer:
         j2 = self.L2 / L2_max
         Emin, Emax = E.min(), E.max()
 
-        _setattr_dict(self, locals())
+        set_attrs(self, locals())
 
         self.buffer['E'] = E
 
@@ -325,7 +365,7 @@ class Tracer:
 
 class Estimator:
     def __init__(self, r, v, pot_factory, pot_param=None,
-                 rlim=None, rlim_obs=None, pobs_fun=None):
+                 rlim=None, rlim_obs=None, func_obs=None):
         """
         r, v: array shape (n, 3)
             Tracer kinematics
@@ -337,15 +377,15 @@ class Estimator:
             Radius cut of the sample
         rlim_obs: None or array of shape (n, 2)     
             Observation limit for each tracer   
-        pobs_fun: callable
+        func_obs: callable
             Radial completeness function, not implemented yet.
         """
         n = len(r)
         assert r.shape == v.shape == (n, 3), "r and v should have the same shape (n, 3)."
 
-        if rlim_obs is not None and pobs_fun is not None:
-            raise ValueError("Only one of rlim_obs and pobs_fun can be specified.")
-        if pobs_fun is not None:
+        if rlim_obs is not None and func_obs is not None:
+            raise ValueError("Only one of rlim_obs and func_obs can be specified.")
+        if func_obs is not None:
             raise NotImplementedError
 
         self.tracer = Tracer(r, v, rlim=None, rlim_obs=None)
@@ -354,7 +394,7 @@ class Estimator:
         self.rmax = self.tracer.rmax
 
         self.rlim_obs = rlim_obs
-        self.pobs_fun = pobs_fun
+        self.func_obs = func_obs
 
         self.pot_factory = pot_factory
         self.pot_param = None  # initialize with None
@@ -423,7 +463,8 @@ class Estimator:
         bincount = self.tracer.count_raidal_bin(rbin)
         bincount /= np.sum(bincount)
 
-        lnp = multinomial.logpmf(rcnt, n=self.ntracer, p=bincount)
+        pbin = bincount / bincount.sum()
+        lnp = stats.multinomial.logpmf(rcnt, n=self.ntracer, p=pbin)
         return lnp
 
     def lnp_opdf_smooth(self, param=None):
@@ -466,4 +507,4 @@ def AndersonDarling_stat(x, axis=None):
 def AndersonDarling_prob(x):
     "Approximate pdf for AD statistic (esp. for n >= 5 and p > 1e-3), see Han et al. 2016"
     w, m1, s1, m2, s2 = 0.569, -0.570, 0.511, 0.227, 0.569
-    return normal(m1, s1).pdf(x) * w + normal(m2, s2).pdf(x) * (1 - w)
+    return stats.norm(m1, s1).pdf(x) * w + stats.norm(m2, s2).pdf(x) * (1 - w)
