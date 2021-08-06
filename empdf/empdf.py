@@ -1,5 +1,16 @@
 """
 Author: Zhaozhou Li (lizz.astro@gmail.com)
+
+
+
+Code structure
+
+Tracer:
+    Workhorse object
+
+Estimator:
+    Likelihoods
+
 """
 
 # import os
@@ -49,6 +60,7 @@ def set_attrs(obj, var_dict, var_list=None):
 # TODO
 
 def set_opt(**args):
+    "See options_default for available options"
     global options
     options.update(**args)
 
@@ -58,9 +70,11 @@ options_default = dict(
     N_EBIN_I=100,  # interpolator for DF(E, j2)
     N_JBIN_I=100,  # interpolator for DF(E, j2)
     N_RBIN_R=50,
-    N_VBIN_R=50,  # quadrature grids for rho(r)
-    N_CBIN_R=50,  # quadrature grids for rho(r)
+    N_VBIN_R=50,   # quadrature grids for rho(r)
+    N_CBIN_R=50,   # quadrature grids for rho(r)
+    KDE_opt={},    # KDE options for N_Ej2
 )
+
 
 options = dict()
 set_opt(**options_default)
@@ -126,7 +140,7 @@ class PotUtility:
         L2_cir = GM * r
 
         # do not interp log(r) over E!
-        interp_L2_cir = CubicSpline(E_cir, L2_cir, extrapolate=False)  
+        interp_L2_cir = CubicSpline(E_cir, L2_cir, extrapolate=False)
         interp_r_cir = CubicSpline(E_cir, r, extrapolate=False)
 
         integrator = Integrator()
@@ -245,13 +259,16 @@ class DFInterpolator:
 
 
 class Tracer:
-    def __init__(self, r, v, rlim=None, rlim_obs=None, func_obs=None):
+    def __init__(self, r, v, rlim=None, rlim_obs=None, func_obs=None, pot=None):
         """
         r, v: array shape (n, 3)
         rlim: None or 2-tuple
         rlim_obs: None or array of shape (n, 2)
             Should be sub-interval of rlim.
         func_obs: callable
+            Can be set though update_func_obs later.
+        pot: callable
+            Can be set though update_potential later.
         """
         rr, vv, vr, vt = decompose_r_v(r, v)
         K = 0.5 * vv**2
@@ -266,53 +283,61 @@ class Tracer:
             assert rlim[1] >= rr.max(), "rlim[1] >= max{|r|} is expected."
         assert rlim[0] < rlim[1], "rlim[0] < rlim[1] is expected."
 
-        # prepare buffer or orbit integration
-        buffer = np.zeros(len(rr), dtype=Particle_dtype)
-        buffer['r'] = rr
-        buffer['L2'] = L2
-
-        if rlim_obs is not None:
-            assert np.all(rlim_obs[0] < rlim_obs[1])
-            buffer['rmin_obs'] = rlim_obs[0]
-            buffer['rmax_obs'] = rlim_obs[1]
-
         stale = Status()  # status flags
 
         set_attrs(self, locals())
 
-        if func_obs is not None:
-            self.update_func_obs(func_obs)
+        # prepare buffer or orbit integration
+        self.buffer = np.zeros(len(rr), dtype=Particle_dtype)
+        self.buffer['r'] = rr
+        self.buffer['L2'] = L2
 
-    def update_func_obs(self, func_obs=None):
-        self._pobs_raw = func_obs(self.rr)  # need normalization!
-        self._wobs = 1 / self._pobs_raw
+        if rlim_obs is not None:
+            assert np.all(rlim_obs[0] < rlim_obs[1])
+            self.buffer['rmin_obs'] = rlim_obs[0]
+            self.buffer['rmax_obs'] = rlim_obs[1]
+        elif func_obs is not None:
+            self.update_func_obs(func_obs)
+        else:
+            self._wobs = None
+
+        if pot is not None:
+            self.update_potential(pot)
+
+    def update_func_obs(self, func_obs):
         self.func_obs = func_obs
+        self._pobs = func_obs(self.rr)  # need normalization later!
+        self._wobs = 1 / self._pobs
+
+        self.stale.wobs = False
+        self.stale.fobs = True
         self.stale.N_Ej2 = True
         self.stale.f_Ej2 = True
 
-    def update_potential(self, pot_util):
+    def update_potential(self, pot):
+        pot_util = PotUtility(self.rmin, self.rmax, pot)
         U = pot_util.interp_pot(self.rr)
         E = self.U + self.K
         L2_max = pot_util.L2_max(E)
-        j2 = self.L2 / L2_max
+        j2 = (self.L2 / L2_max).clip(max=1)
         Emin, Emax = E.min(), E.max()
 
         set_attrs(self, locals())
 
         self.buffer['E'] = E
 
-        stale = self.stale
-        stale.rlim = True
-        stale.Tr = True
-        stale.phase = True
+        self.stale.rlim = True
+        self.stale.Tr = True
+        self.stale.phase = True
 
         if self.rlim_obs is None:
-            stale.wobs = False  # no need of wobs
+            self.stale.wobs = False  # no need of wobs
         else:
-            stale.wobs = True
+            self.stale.wobs = True
 
-        stale.N_Ej2 = True
-        stale.f_Ej2 = True
+        self.stale.fobs = True
+        self.stale.N_Ej2 = True
+        self.stale.f_Ej2 = True
 
     def integrate(self, set_Tr=False, set_phase=False, set_wobs=False):
         # orbit integration: Tr and wgt_obs
@@ -338,18 +363,21 @@ class Tracer:
             if set_Tr:
                 self.Tr = self.buffer['Tr'].copy()
                 stale.Tr = False
+
             if set_phase:
-                self.theta = 0.5 * np.sign(self.vr) * self.buffer['Tr_cur'] / self.buffer['Tr']
+                self.phase = 0.5 * np.sign(self.vr) * self.buffer['Tr_cur'] / self.buffer['Tr']
                 stale.phase = False
 
             if set_wobs:
                 self._wobs = self.buffer['Tr'] / self.buffer['Tr_obs']
-                stale.wgt_obs = False
+                stale.wobs = False
 
     def count_raidal_bin(self, rbin):
         integrator = self.pot_util.integrator
-        # self.buffer['wgt'] = 1
-        # self.buffer['wgt'] = self._wobs
+        if self._wobs is None:
+            self.buffer['wgt'] = 1
+        else:
+            self.buffer['wgt'] = self._wobs
         integrator.set_data(self.buffer, self.rmin, self.rmax)
         bincount = integrator.count_raidal_bin()
         return bincount
@@ -376,117 +404,126 @@ class Tracer:
         Emin = self.Emin
         Emax = self.Emax + self.N_Ej2_interp.bandwidth * self.N_Ej2_interp.scale[0] * 2  # Emax + 2 * bandwidth
 
-        self.df_interp = DFInterpolator(Emin, Emax, self.pot_util, self.N_Ej2_interp)
+        self.df_interp = DFInterpolator(Emin, Emax, self.pot_util, self.N_Ej2_interp, self.func_obs)
         self.stale.f_Ej2 = False
 
-    def compute_norm_obs(self):
+    def compute_fobs(self):
+        "Normalized observation probability."
+        if not self.stale.fobs:
+            return
+
         if self.rlim_obs is not None:
-            self.norm_obs = 1 / np.diff(self.df_interp.cdf_r(self.rlim_obs)).ravel()
+            pobs_cdf = self.df_interp.cdf_r(self.rlim_obs)
+            self.fobs = 1 / (pobs_cdf[:, 1] - pobs_cdf[:, 0])
+
         elif self.func_obs is not None:
-            self.norm_obs = self.wgt_obs / np.diff(self.df_interp.cdf_r_obs([self.rmax, self.rmin]))[0]
+            pobs_cdf = self.df_interp.cdf_r_obs([self.rmax, self.rmin])
+            self.fobs = self._pobs / (pobs_cdf[:, 1] - pobs_cdf[:, 0])
+
+        else:
+            self.fobs = 1
+
+        self.stale.fobs = False
 
 
 class Estimator:
     """
     Examples
     --------
-    estimator =  Estimator(r, v, pot_facotry, rlim=[rmin, rmax], rlim_obs=rlim_obs)
-    lnp = estimator.lnp_emdf(param)
+    estimator =  Estimator(r, v, rlim=[rmin, rmax], rlim_obs=rlim_obs)
+    pot = pot_factory(param)
+    lnp = estimator.lnp_emdf(pot)
     """
 
-    def __init__(self, r, v, pot_factory, pot_param=None,
-                 rlim=None, rlim_obs=None, func_obs=None):
+    def __init__(self, r, v, rlim=None, rlim_obs=None, func_obs=None, pot=None):
         """
         r, v: array shape (n, 3)
             Tracer kinematics
-        pot_factory: callable
-            A function of potential
-        pot_param: 
-            Initial parameters
         rlim: None or 2-tuple
             Radius cut of the sample
-        rlim_obs: None or array of shape (n, 2)     
-            Observation limit for each tracer   
+        rlim_obs: None or array of shape (n, 2)
+            Observation limit for each tracer
         func_obs: callable
-            Radial completeness function, not implemented yet.
+            Radial completeness function.
         """
         n = len(r)
         assert r.shape == v.shape == (n, 3), "r and v should have the same shape (n, 3)."
 
         if rlim_obs is not None and func_obs is not None:
             raise ValueError("Only one of rlim_obs and func_obs can be specified.")
-        if func_obs is not None:
-            raise NotImplementedError
 
-        self.tracer = Tracer(r, v, rlim=rlim, rlim_obs=rlim_obs, func_obs=func_obs)
+        self.tracer = Tracer(r, v, rlim=rlim, rlim_obs=rlim_obs, func_obs=func_obs, pot=pot)
         self.ntracer = self.tracer.n
         self.rmin = self.tracer.rmin
         self.rmax = self.tracer.rmax
 
-        self.rlim_obs = rlim_obs
-        self.func_obs = func_obs
-
-        self.pot_factory = pot_factory
-        self.pot_param = None  # initialize with None
-
-        if pot_param is not None:
-            self.update_param(pot_param)
+    def update_pot(self,
+                   pot=None,
+                   func_obs=None,
+                   set_Tr=False,
+                   set_phase=False,
+                   set_wobs=False,
+                   set_fobs=False,
+                   set_N_Ej2=False,
+                   set_f_Ej2=False,
+                   ):
+        """
+        pot: None or function of r
+            Potential, unchanged if None.
+        func_obs: None or function of r
+            Radial completeness function, unchanged if None.
+        """
+        if pot is not None:
+            self.tracer.update_potential(pot)
+        elif self.tracer.pot is None:
+            raise ValueError('Please set a `pot` first.')
 
         if func_obs is not None:
-            self.update_func_obs(func_obs)
+            if self.tracer.lim_obs is None:
+                self.tracer.update_func_obs(func_obs)
+            else:
+                raise ValueError("Only one of rlim_obs and func_obs can be specified.")
 
-    def update_param(self, param=None,
-                     set_Tr=False,
-                     set_phase=False,
-                     set_wobs=False,
-                     set_N_Ej2=False,
-                     set_f_Ej2=False):
-        if param is None:
-            if self.pot_param is None:
-                raise ValueError('The current param was not set yet.')
-        elif np.array_equal(param, self.pot_param):
-            pass
-        else:
-            self.pot_param = param
-            self.pot = self.pot_factory(*param)
-            self.pot_util = PotUtility(self.rmin, self.rmax, self.pot)
-            self.tracer.update_potential(self.pot_util)
-
+        # solve the dependence
+        if set_fobs:
+            set_f_Ej2 = True
         if set_f_Ej2:
             set_N_Ej2 = True
         if set_N_Ej2:
             set_wobs = True
-        if set_phase or set_wobs:
+        if set_wobs or set_phase:
             set_Tr = True
 
+        # calculations
         if set_Tr:
             self.tracer.integrate(set_Tr=set_Tr, set_phase=set_phase, set_wobs=set_wobs)
         if set_N_Ej2:
             self.tracer.build_N_Ej2()
         if set_f_Ej2:
             self.tracer.build_f_Ej2()
+        if set_fobs:
+            self.tracer.compute_fobs()
 
-    def lnp_emdf(self, param=None):
-        self.update_param(param, set_Tr=True, set_N_Ej2=True)
+    def lnp_emdf(self, pot=None, mass=None, func_obs=None):
+        self.update_pot(pot, mass, func_obs, set_Tr=True, set_wobs=True, set_pobs=True, set_N_Ej2=True)
 
         tracer = self.tracer
         Tr, L2_max = tracer.Tr, tracer.L2_max
-        p_Ej = tracer.N_Ej2_interp.autopdf()
+        lnp_Ej = tracer.N_Ej2_interp.autopdf(log=True)
 
-        lnp = np.log(p_Ej / Tr / L2_max).sum()
+        lnp = lnp_Ej - np.log(Tr * L2_max).sum()
 
-        if self.rlim_obs is None and self.func_obs is None:
+        if self.tracer.rlim_obs is None and self.tracer.func_obs is None:
             return lnp
         else:
-            self.tracer.compute_norm_obs()
-            return lnp + np.log(self.tracer.norm_obs)
+            return lnp + np.log(self.tracer.fobs).sum()
 
-    def lnp_opdf(self, param=None, rbin=None):
+    def lnp_opdf(self, pot=None, rbin=None):
         """
         rbin: None, int, or 1D float array
             If None, log(ntracer) will be used.
         """
-        self.update_param(param)
+        self.update_pot(pot)
 
         if rbin is None:
             rbin = max(round(np.log(self.tracer.n)), 2)
@@ -510,23 +547,23 @@ class Estimator:
         lnp = stats.multinomial.logpmf(rcnt, n=self.ntracer, p=pbin)
         return lnp
 
-    def lnp_opdf_smooth(self, param=None):
+    def lnp_opdf_smooth(self, pot=None):
         raise NotImplementedError
 
-    def stats_AD(self, param=None):
+    def stats_AD(self, pot=None):
         """
         Negative statistic returned for maximization procedure.
         """
-        self._update_param(param, set_phase=True)
+        self._update_pot(pot, set_phase=True)
 
         phase_abs = np.abs(self.tracer.phase) * 2
         return -AndersonDarling_stat(phase_abs)
 
-    def stats_MeanPhase(self, param=None):
+    def stats_MeanPhase(self, pot=None):
         """
         Negative statistic returned for maximization procedure.
         """
-        self._update_param(param, set_phase=True)
+        self._update_pot(pot, set_phase=True)
 
         phase_abs = np.abs(self.tracer.phase) * 2
         return -MeanPhase_stat(phase_abs)
