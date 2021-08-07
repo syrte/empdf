@@ -266,16 +266,18 @@ class Tracer:
         rlim_obs: None or array of shape (n, 2)
             Should be sub-interval of rlim.
         func_obs: callable
-            Can be set though update_func_obs later.
+            Can be updated though update_func_obs later.
         pot: callable
-            Can be set though update_potential later.
+            Can be updated though update_potential later.
         """
+        # basic kinematics
         rr, vv, vr, vt = decompose_r_v(r, v)
         K = 0.5 * vv**2
         L = vt * rr
         L2 = L**2
         n = len(rr)
 
+        # rlim and rlim_obs
         if rlim is None:
             rlim = rr.min(), rr.max()
         else:
@@ -283,57 +285,75 @@ class Tracer:
             assert rlim[1] >= rr.max(), "rlim[1] >= max{|r|} is expected."
         assert rlim[0] < rlim[1], "rlim[0] < rlim[1] is expected."
 
-        set_attrs(self, locals())
-
-        # prepare buffer or orbit integration
-        self.buffer = np.zeros(len(rr), dtype=Particle_dtype)
-        self.buffer['r'] = rr
-        self.buffer['L2'] = L2
+        rmin, rmax = rlim
 
         if rlim_obs is not None:
-            assert np.all(rlim_obs[0] < rlim_obs[1])
-            self.buffer['rmin_obs'] = rlim_obs[0]
-            self.buffer['rmax_obs'] = rlim_obs[1]
-        elif func_obs is not None:
-            self.update_func_obs(func_obs)
-        else:
-            self._wobs = None
+            assert np.all(rlim_obs[:, 0] < rlim_obs[:, 1])
+            rlim_obs = rlim_obs.clip(rmin, rmax)
 
-        if pot is not None:
-            self.update_potential(pot)
-
-    def update_func_obs(self, func_obs):
-        self.func_obs = func_obs
-        self._pobs = func_obs(self.rr)  # need normalization later!
-        self._wobs = 1 / self._pobs
-
-    def update_potential(self, pot):
-        pot_util = PotUtility(self.rmin, self.rmax, pot)
-        U = pot_util.interp_pot(self.rr)
-        E = self.U + self.K
-        L2_max = pot_util.L2_max(E)
-        j2 = (self.L2 / L2_max).clip(max=1)
-        Emin, Emax = E.min(), E.max()
-
+        # store all current local variables to self
         set_attrs(self, locals())
 
-        self.buffer['E'] = E
+        # update func_obs and pot
+        self.prepare_buffer()
+        self.update_func_obs(func_obs)
+        self.update_potential(pot)  # after prepare buffer
 
-    def integrate(self, set_Tr=False, set_phase=False, set_wobs=False):
-        # orbit integration: Tr and wgt_obs
+    def prepare_buffer(self):
+        """
+        prepare buffer or orbit integration
+        """
+        buffer = np.zeros(self.n, dtype=Particle_dtype)
+        buffer['r'] = self.rr
+        buffer['L2'] = self.L2
 
+        if self.rlim_obs is not None:
+            buffer['rmin_obs'] = self.rlim_obs[:, 0]
+            buffer['rmax_obs'] = self.rlim_obs[:, 1]
+        self.buffer = buffer
+
+    def update_func_obs(self, func_obs):
+        if func_obs is None:
+            return
+        else:
+            self.func_obs = func_obs
+            self._pobs_raw = func_obs(self.rr)  # need normalization later!
+            self._wobs = 1 / self._pobs_raw
+
+    def update_potential(self, pot):
+        if pot is None:
+            return
+        else:
+            pot_util = PotUtility(self.rmin, self.rmax, pot)
+            U = pot_util.interp_pot(self.rr)
+            E = U + self.K
+            Emin, Emax = E.min(), E.max()
+
+            set_attrs(self, locals())
+
+            self.buffer['E'] = E
+
+    def integrate(self, set_rlim=True, set_Tr=False, set_phase=False, set_wobs=False):
+        """
+        orbit integration
+        """
+
+        # update flags
         if self.rlim_obs is None:
-            set_wobs = None  # no need of wobs
-
+            set_wobs = False  # no need of wobs
         if set_phase or set_wobs:
-            set_Tr = True  # dependence
-
+            set_Tr = True
         if set_Tr:
-            integrator = self.pot_util.integrator
-            integrator.set_data(self.buffer, self.rmin, self.rmax)
+            set_rlim = True
 
+        # setup integrator
+        integrator = self.pot_util.integrator
+        integrator.set_data(self.buffer, self.rmin, self.rmax)
+
+        if set_rlim:
             integrator.solve_radial_limits()
 
+        if set_Tr or set_phase or set_wobs:
             integrator.compute_radial_period(set_t=set_Tr, set_tcur=set_phase, set_tobs=set_wobs)
 
             if set_Tr:
@@ -346,47 +366,61 @@ class Tracer:
                 self._wobs = self.buffer['Tr'] / self.buffer['Tr_obs']
 
     def count_raidal_bin(self, rbin):
+        """
+        Should be executed after integrate(set_rlim=True)
+        """
         integrator = self.pot_util.integrator
-        if self._wobs is None:
-            self.buffer['wgt'] = 1
-        else:
-            self.buffer['wgt'] = self._wobs
         integrator.set_data(self.buffer, self.rmin, self.rmax)
         bincount = integrator.count_raidal_bin()
         return bincount
 
     def build_N_Ej2(self, **kde_opt):
         """
+        Should be executed after integrate(set_wobs=True)
+
         kde_opt:
             e.g., backend='sklearn', bw_factor=1, kernel='epanechnikov'
         """
+        self.L2_max = self.pot_util.L2_max(self.E)
+        self.j2 = (self.L2 / self.L2_max).clip(max=1)
 
-        data = np.stack([self.E, self.j2], axis=-1)
-        weights = self._wobs
+        data = np.stack([self.E, self.j2], axis=-1)  # nx2
+
+        if self.rlim_obs is None and self.func_obs is None:
+            weights = None
+        else:
+            weights = self._wobs
+
         boundary = [[self.Emin, None], [0, 1]]
 
         self.N_Ej2_interp = KDE(data, weights=weights, boundary=boundary, **kde_opt)
 
     def build_f_Ej2(self):
-
+        """
+        Should be executed after build_N_Ej2()
+        """
+        N_Ej2 = self.N_Ej2_interp
         Emin = self.Emin
-        Emax = self.Emax + self.N_Ej2_interp.bandwidth * self.N_Ej2_interp.scale[0] * 2  # Emax + 2 * bandwidth
+        Emax = self.Emax + 2 * N_Ej2.bandwidth * N_Ej2.scale[0]  # Emax + 2 * bandwidth
 
-        self.df_interp = DFInterpolator(Emin, Emax, self.pot_util, self.N_Ej2_interp, self.func_obs)
+        self.df_interp = DFInterpolator(Emin, Emax, self.pot_util, N_Ej2, self.func_obs)
 
-    def compute_fobs(self):
-        "Normalized observation probability."
-
+    def compute_pobs(self):
+        """
+        Normalized observation probability.
+        """
         if self.rlim_obs is not None:
             pobs_cdf = self.df_interp.cdf_r(self.rlim_obs)
-            self.fobs = 1 / (pobs_cdf[:, 1] - pobs_cdf[:, 0])
+            self.pobs = 1 / (pobs_cdf[:, 1] - pobs_cdf[:, 0])
 
         elif self.func_obs is not None:
             pobs_cdf = self.df_interp.cdf_r_obs([self.rmax, self.rmin])
-            self.fobs = self._pobs / (pobs_cdf[:, 1] - pobs_cdf[:, 0])
+            self.pobs = self._pobs_raw / (pobs_cdf[1] - pobs_cdf[0])
 
         else:
-            self.fobs = 1
+            self.pobs = 1
+
+        return self.pobs
 
 
 class Estimator:
@@ -426,7 +460,7 @@ class Estimator:
                    set_Tr=False,
                    set_phase=False,
                    set_wobs=False,
-                   set_fobs=False,
+                   set_pobs=False,
                    set_N_Ej2=False,
                    set_f_Ej2=False,
                    ):
@@ -448,7 +482,7 @@ class Estimator:
                 raise ValueError("Only one of rlim_obs and func_obs can be specified.")
 
         # solve the dependence
-        if set_fobs:
+        if set_pobs:
             set_f_Ej2 = True
         if set_f_Ej2:
             set_N_Ej2 = True
@@ -464,8 +498,8 @@ class Estimator:
             self.tracer.build_N_Ej2()
         if set_f_Ej2:
             self.tracer.build_f_Ej2()
-        if set_fobs:
-            self.tracer.compute_fobs()
+        if set_pobs:
+            self.tracer.compute_pobs()
 
     def lnp_emdf(self, pot=None, mass=None, func_obs=None):
         self.update_pot(pot, mass, func_obs, set_Tr=True, set_wobs=True, set_pobs=True, set_N_Ej2=True)
@@ -479,7 +513,7 @@ class Estimator:
         if self.tracer.rlim_obs is None and self.tracer.func_obs is None:
             return lnp
         else:
-            return lnp + np.log(self.tracer.fobs).sum()
+            return lnp + np.log(self.tracer.pobs).sum()
 
     def lnp_opdf(self, pot=None, rbin=None):
         """
