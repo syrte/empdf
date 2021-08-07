@@ -283,8 +283,6 @@ class Tracer:
             assert rlim[1] >= rr.max(), "rlim[1] >= max{|r|} is expected."
         assert rlim[0] < rlim[1], "rlim[0] < rlim[1] is expected."
 
-        stale = Status()  # status flags
-
         set_attrs(self, locals())
 
         # prepare buffer or orbit integration
@@ -309,11 +307,6 @@ class Tracer:
         self._pobs = func_obs(self.rr)  # need normalization later!
         self._wobs = 1 / self._pobs
 
-        self.stale.wobs = False
-        self.stale.fobs = True
-        self.stale.N_Ej2 = True
-        self.stale.f_Ej2 = True
-
     def update_potential(self, pot):
         pot_util = PotUtility(self.rmin, self.rmax, pot)
         U = pot_util.interp_pot(self.rr)
@@ -326,51 +319,31 @@ class Tracer:
 
         self.buffer['E'] = E
 
-        self.stale.rlim = True
-        self.stale.Tr = True
-        self.stale.phase = True
-
-        if self.rlim_obs is None:
-            self.stale.wobs = False  # no need of wobs
-        else:
-            self.stale.wobs = True
-
-        self.stale.fobs = True
-        self.stale.N_Ej2 = True
-        self.stale.f_Ej2 = True
-
     def integrate(self, set_Tr=False, set_phase=False, set_wobs=False):
         # orbit integration: Tr and wgt_obs
 
-        stale = self.stale
-        integrator = self.pot_util.integrator
-        integrator.set_data(self.buffer, self.rmin, self.rmax)
-
-        if stale.rlim:
-            integrator.solve_radial_limits()
-            stale.rlim = False
+        if self.rlim_obs is None:
+            set_wobs = None  # no need of wobs
 
         if set_phase or set_wobs:
-            set_Tr = True
+            set_Tr = True  # dependence
 
-        set_Tr = stale.Tr and set_Tr
-        set_phase = stale.phase and set_phase
-        set_wobs = stale.wobs and set_wobs
+        if set_Tr:
+            integrator = self.pot_util.integrator
+            integrator.set_data(self.buffer, self.rmin, self.rmax)
 
-        if (set_Tr or set_phase or set_wobs):
+            integrator.solve_radial_limits()
+
             integrator.compute_radial_period(set_t=set_Tr, set_tcur=set_phase, set_tobs=set_wobs)
 
             if set_Tr:
                 self.Tr = self.buffer['Tr'].copy()
-                stale.Tr = False
 
             if set_phase:
                 self.phase = 0.5 * np.sign(self.vr) * self.buffer['Tr_cur'] / self.buffer['Tr']
-                stale.phase = False
 
             if set_wobs:
                 self._wobs = self.buffer['Tr'] / self.buffer['Tr_obs']
-                stale.wobs = False
 
     def count_raidal_bin(self, rbin):
         integrator = self.pot_util.integrator
@@ -387,30 +360,22 @@ class Tracer:
         kde_opt:
             e.g., backend='sklearn', bw_factor=1, kernel='epanechnikov'
         """
-        if not self.stale.N_Ej2:
-            return
 
         data = np.stack([self.E, self.j2], axis=-1)
         weights = self._wobs
         boundary = [[self.Emin, None], [0, 1]]
 
         self.N_Ej2_interp = KDE(data, weights=weights, boundary=boundary, **kde_opt)
-        self.stale.N_Ej2 = False
 
     def build_f_Ej2(self):
-        if not self.stale.f_Ej2:
-            return
 
         Emin = self.Emin
         Emax = self.Emax + self.N_Ej2_interp.bandwidth * self.N_Ej2_interp.scale[0] * 2  # Emax + 2 * bandwidth
 
         self.df_interp = DFInterpolator(Emin, Emax, self.pot_util, self.N_Ej2_interp, self.func_obs)
-        self.stale.f_Ej2 = False
 
     def compute_fobs(self):
         "Normalized observation probability."
-        if not self.stale.fobs:
-            return
 
         if self.rlim_obs is not None:
             pobs_cdf = self.df_interp.cdf_r(self.rlim_obs)
@@ -422,8 +387,6 @@ class Tracer:
 
         else:
             self.fobs = 1
-
-        self.stale.fobs = False
 
 
 class Estimator:
