@@ -23,7 +23,7 @@ cdef:
 
 Particle_dtype = np.dtype({
     'formats': ['f8'] * 11,
-    'names': ['E', 'L2', 'r', 'rmin', 'rmax', 'Tr', 'Tr_cur', 'rmin_obs', 'rmax_obs', 'Tr_obs', 'wgt']
+    'names': ['E', 'L2', 'r', 'rmin', 'rmax', 'Tr', 'Tr_cur', 'rmin_obs', 'rmax_obs', 'Tr_obs']
 })
 
 
@@ -38,7 +38,6 @@ cdef packed struct Particle_t:
     double rmin_obs  # [opt] observable range
     double rmax_obs  # [opt] specified by observation
     double Tr_obs    # [opt] rmin_obs->rmax_obs
-    double wgt       # [opt] weight of the orbit, should be 1 by default, used in count_raidal_bin
 
 
 cdef packed struct Orbit_t:
@@ -254,7 +253,7 @@ cdef ndarray count_raidal_bin(Particle_t[:] parr, gsl_spline * potential, double
                         gsl_integration_cquad(func, rmin, rmax, epsabs, epsrel, workspace, t, NULL, NULL)
 
                         omp.omp_set_lock(&lock)
-                        bincount[j] += p.wgt * t[0] / p.Tr
+                        bincount[j] += t[0] / p.Tr
                         omp.omp_unset_lock(&lock)
 
             elif rmin <= rmax:
@@ -262,7 +261,7 @@ cdef ndarray count_raidal_bin(Particle_t[:] parr, gsl_spline * potential, double
                 j = gsl_interp_accel_find(bin_acc, &rbin[0], nbin, rmin)
 
                 omp.omp_set_lock(&lock)
-                bincount[j] += p.wgt
+                bincount[j] += 1
                 omp.omp_unset_lock(&lock)
 
             else:
