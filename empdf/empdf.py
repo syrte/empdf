@@ -94,13 +94,6 @@ def decompose_r_v(r, v):
     return rr, vv, vr, vt
 
 
-class Status:
-    """
-    status flag for updating parameters
-    """
-    pass
-
-
 def make_grid(rmin, rmax, n, dr=None):
     """
     make interpolating grids
@@ -165,7 +158,7 @@ class PotUtility:
         L2_max[ix2] = self.rmax**2 * 2 * (E[ix2] - self.U[-1])  # .clip(1e-20)  # avoid zero?
 
         if return_r:
-            r = np.exp(self.interp_lnr_cir(E))
+            r = self.interp_r_cir(E)
             r[ix1] = self.rmin
             r[ix2] = self.rmax
             return L2_max, r
@@ -174,12 +167,12 @@ class PotUtility:
 
 
 class DFInterpolator:
-    N_EBIN_I = 100  # interpolator for DF(E, j2)
-    N_JBIN_I = 100  # interpolator for DF(E, j2)
+    N_EBIN_I = 101  # interpolator for DF(E, j2)
+    N_JBIN_I = 99  # interpolator for DF(E, j2)
 
-    N_RBIN_R = 50
+    N_RBIN_R = 51
     N_VBIN_R = 50  # quadrature grids for rho(r)
-    N_CBIN_R = 50  # quadrature grids for rho(r)
+    N_CBIN_R = 49  # quadrature grids for rho(r)
 
     x1, w1 = roots_legendre(N_VBIN_R)
     x2, w2 = roots_legendre(N_CBIN_R)
@@ -207,26 +200,35 @@ class DFInterpolator:
         pot_util.integrator.compute_radial_period(set_t=True, set_tcur=False, set_tobs=False)
 
         Tr = buffer['Tr'].copy()
-        p_Ej2 = N_Ej2_interp.pdf(np.stack([E, j2], axis=-1))
-        f_Ej2 = p_Ej2 / (4 * np.pi**2 * Tr * L2_max)
 
-        self.f_Ej2 = EqualGridInterpolator([E, j2], f_Ej2)
+        E_j2 = np.dstack(np.meshgrid(E, j2, indexing='ij')).reshape(-1, 2)
+        p_Ej2 = N_Ej2_interp(E_j2).reshape(self.N_EBIN_I, self.N_JBIN_I)
+
         self.p_Ej2 = EqualGridInterpolator([E, j2], p_Ej2)
-        # self.Tr_Ej2 = EqualGridInterpolator([E, j2], Tr)
+        self.Tr_Ej2 = EqualGridInterpolator([E, j2], Tr)
+
+        # f_Ej2 = p_Ej2 / (4 * np.pi**2 * Tr * L2_max.reshape(-1, 1))
+        # self.f_Ej2 = EqualGridInterpolator([E, j2], f_Ej2)
 
         self.buffer = buffer
         self.pot_util = pot_util
         self.rmin = pot_util.rmin
         self.rmax = pot_util.rmax
+        self.Emin = Emin
+        self.Emax = Emax
 
         self.func_obs = func_obs
 
         self._prepare_pdf()
 
+    # def f_Ej2(self, E, j2):
+
     def f_EL2(self, E, L2):
         L2_max = self.pot_util.L2_max(E)
-        j2 = L2 / L2_max
-        return self.f_Ej2([E, j2])
+        j2 = (L2 / L2_max).clip(max=1)
+        p_Ej2 = self.p_Ej2([E, j2])
+        Tr = self.Tr_Ej2([E, j2])
+        return p_Ej2 / (4 * np.pi**2 * Tr * L2_max.reshape(-1, 1))
 
     def __call__(self, E, j2):
         return self.f_Ej2([E, j2])
@@ -235,7 +237,7 @@ class DFInterpolator:
         # r = np.linspace(self.rmin, self.rmax, self.N_RBIN_R).reshape(-1, 1, 1)
         r = make_grid(self.rmin, self.rmax, self.N_RBIN_R).reshape(-1, 1, 1)
         U = self.pot_util(r)
-        vmax = (2 * (self.E_max - U))**0.5  # shape (nr, 1, 1)
+        vmax = (2 * (self.Emax - U))**0.5  # shape (nr, 1, 1)
 
         v = self.x1.reshape(-1, 1) * vmax  # shape (nr, nv, 1)
         dv = self.w1.reshape(-1, 1) * vmax
@@ -246,7 +248,7 @@ class DFInterpolator:
         E = U + 0.5 * v2
         L2 = r**2 * v2 * (1 - c**2)  # shape (nr, nv, nc)
         f = self.f_EL2(E, L2)  # shape (nr, nv, nc)
-        p_r = 4 * np.pi * (f * v2 * dv * dc).reshape(-1, 1).sum(-1)
+        p_r = 4 * np.pi * (f * v2 * dv * dc).reshape(self.N_RBIN_R, -1).sum(-1)
 
         r = r.reshape(-1)
         self.pdf_r = CubicSpline(r, p_r)
@@ -331,10 +333,11 @@ class Tracer:
         else:
             pot_util = PotUtility(self.rmin, self.rmax, pot)
             U = pot_util.interp_pot(self.rr)
+            Umin = pot_util.interp_pot(self.rmin)
             E = U + self.K
             L2_max = pot_util.L2_max(E)
             j2 = (self.L2 / L2_max).clip(max=1)
-            Emin, Emax = E.min(), E.max()
+            Emin, Emax = Umin, E.max()
 
             set_attrs(self, locals())
 
@@ -349,7 +352,7 @@ class Tracer:
 
         # solve the dependencies
         if self.rlim_obs is None:
-            set_wobs = False  # wobs is not needed 
+            set_wobs = False  # wobs is not needed
         if set_phase or set_wobs:
             set_Tr = True
         if set_Tr:
@@ -459,7 +462,7 @@ class Tracer:
             set_wobs = True
 
         # calculations
-        if set_rlim:
+        if set_rlim or set_Tr or set_phase or set_wobs:
             self.integrate(set_rlim=set_rlim, set_Tr=set_Tr, set_phase=set_phase, set_wobs=set_wobs)
         if set_N_Ej2:
             self.build_N_Ej2()
