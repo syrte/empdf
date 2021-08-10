@@ -121,7 +121,7 @@ class PotUtility:
         # r = np.linspace(rmin, rmax, self.N_RBIN_I)
         r = make_grid(rmin, rmax, self.N_RBIN_I)
         U = pot(r)
-        interp_pot = CubicSpline(r, U, extrapolate=False)
+        interp_pot = CubicSpline(r, U, extrapolate=True)
 
         if mass is None:
             GM = interp_pot.derivative()(r) * r**2
@@ -133,8 +133,8 @@ class PotUtility:
         L2_cir = GM * r
 
         # do not interp log(r) over E!
-        interp_L2_cir = CubicSpline(E_cir, L2_cir, extrapolate=False)
-        interp_r_cir = CubicSpline(E_cir, r, extrapolate=False)
+        interp_L2_cir = CubicSpline(E_cir, L2_cir, extrapolate=True)
+        interp_r_cir = CubicSpline(E_cir, r, extrapolate=True)
 
         integrator = Integrator()
         integrator.set_potential(r, U, interp_pot.c)
@@ -167,12 +167,12 @@ class PotUtility:
 
 
 class DFInterpolator:
-    N_EBIN_I = 101  # interpolator for DF(E, j2)
-    N_JBIN_I = 99  # interpolator for DF(E, j2)
+    N_EBIN_I = 201  # interpolator for DF(E, j2)
+    N_JBIN_I = 199  # interpolator for DF(E, j2)
 
-    N_RBIN_R = 51
-    N_VBIN_R = 50  # quadrature grids for rho(r)
-    N_CBIN_R = 49  # quadrature grids for rho(r)
+    N_RBIN_R = 101
+    N_VBIN_R = 100  # quadrature grids for rho(r)
+    N_CBIN_R = 99  # quadrature grids for rho(r)
 
     x1, w1 = roots_legendre(N_VBIN_R)
     x2, w2 = roots_legendre(N_CBIN_R)
@@ -199,7 +199,7 @@ class DFInterpolator:
         pot_util.integrator.solve_radial_limits()
         pot_util.integrator.compute_radial_period(set_t=True, set_tcur=False, set_tobs=False)
 
-        Tr = buffer['Tr'].copy()
+        Tr = buffer['Tr'].copy() * 2  # note that buffer['Tr'] is only half
 
         E_j2 = np.dstack(np.meshgrid(E, j2, indexing='ij')).reshape(-1, 2)
         p_Ej2 = N_Ej2_interp(E_j2).reshape(self.N_EBIN_I, self.N_JBIN_I)
@@ -228,14 +228,15 @@ class DFInterpolator:
         j2 = (L2 / L2_max).clip(max=1)
         p_Ej2 = self.p_Ej2([E, j2])
         Tr = self.Tr_Ej2([E, j2])
-        return p_Ej2 / (4 * np.pi**2 * Tr * L2_max.reshape(-1, 1))
+        return p_Ej2 / (4 * np.pi**2 * Tr * L2_max)
 
     def __call__(self, E, j2):
         return self.f_Ej2([E, j2])
 
     def _prepare_pdf(self):
         # r = np.linspace(self.rmin, self.rmax, self.N_RBIN_R).reshape(-1, 1, 1)
-        r = make_grid(self.rmin, self.rmax, self.N_RBIN_R).reshape(-1, 1, 1)
+        # r = make_grid(self.rmin, self.rmax, self.N_RBIN_R).reshape(-1, 1, 1)
+        r = np.logspace(np.log10(self.rmin), np.log10(self.rmax), self.N_RBIN_R).reshape(-1, 1, 1)
         U = self.pot_util(r)
         vmax = (2 * (self.Emax - U))**0.5  # shape (nr, 1, 1)
 
@@ -252,8 +253,8 @@ class DFInterpolator:
 
         r = r.reshape(-1)
         self.pdf_r = CubicSpline(r, p_r)
-        self.cdf_r = CubicSpline(r, p_r * r**2).antiderivative(1)
-        # XXX, Normalized or not?
+        self.cdf_r = CubicSpline(r, 4 * np.pi * p_r * r**2).antiderivative(1)
+        # XXX, Normalized or not? do need cdf_r when having cdf_r_obs?
 
         if self.func_obs is not None:
             pobs = self.func_obs(r)
@@ -383,7 +384,7 @@ class Tracer:
         """
         integrator = self.pot_util.integrator
         integrator.set_data(self.buffer, self.rmin, self.rmax)
-        bincount = integrator.count_raidal_bin()
+        bincount = integrator.count_raidal_bin(rbin)
         return bincount
 
     def build_N_Ej2(self, **kde_opt):
@@ -400,7 +401,8 @@ class Tracer:
         else:
             weights = self._wobs
 
-        boundary = [[self.Emin, None], [0, 1]]
+        # boundary = [[self.Emin, None], [0, 1]]
+        boundary = [None, [0, 1]]  # no boundary constraints for Energy
 
         self.N_Ej2_interp = KDE(data, weights=weights, boundary=boundary, **kde_opt)
 
