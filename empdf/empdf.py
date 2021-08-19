@@ -74,9 +74,10 @@ options_default = dict(
     N_CBIN_R=50,   # quadrature grids for rho(r)
     KDE_OPT=dict(),    # KDE options for N_Ej2
 )
-# kde_opt: e.g., 
-# dict(backend='sklearn', bw_factor=1, kernel='epanechnikov')
-# dict(backend='KDEpy.FFTKDE', bw_factor=1, kernel='epanechnikov', grids=100, grids_tol=2)
+# XXX: not implemented for N_xxxx_x
+# Example
+# set_opt(KDE_OPT=dict(backend='KDEpy.FFTKDE', bw_factor=1, kernel='epanechnikov', grids=300, grids_tol=2))
+# set_opt(KDE_OPT=dict(backend='sklearn', bw_factor=1, kernel='epanechnikov'))
 
 
 options = dict()
@@ -205,11 +206,15 @@ class DFInterpolator:
         Tr = buffer['Tr'].copy() * 2  # note that buffer['Tr'] is only half
 
         E_j2 = np.dstack(np.meshgrid(E, j2, indexing='ij')).reshape(-1, 2)
-        p_Ej2 = N_Ej2_interp(E_j2).reshape(self.N_EBIN_I, self.N_JBIN_I)
-
-        self.p_Ej2 = EqualGridInterpolator([E, j2], p_Ej2)
         self.Tr_Ej2 = EqualGridInterpolator([E, j2], Tr)
 
+        if N_Ej2_interp.backend.startswith('KDEpy'):
+            self.p_Ej2 = N_Ej2_interp.kde  # already interpolating grid
+        else:
+            p_Ej2 = N_Ej2_interp(E_j2).reshape(self.N_EBIN_I, self.N_JBIN_I)
+            self.p_Ej2 = EqualGridInterpolator([E, j2], p_Ej2)
+
+        # we don't want to interpolate f_Ej2 directly, too sharp at center
         # f_Ej2 = p_Ej2 / (4 * np.pi**2 * Tr * L2_max.reshape(-1, 1))
         # self.f_Ej2 = EqualGridInterpolator([E, j2], f_Ej2)
 
