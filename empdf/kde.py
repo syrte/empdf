@@ -224,7 +224,7 @@ class KDE:
         elif backend == 'sklearn':
             self._init_kde_sklearn(data_scaled, weights, bandwidth, kernel, **options)
         elif backend == 'KDEpy.FFTKDE' or backend == 'KDEpy.TreeKDE':
-            self._init_kde_kdepy(data_scaled, weights, bandwidth, kernel, backend, boundary, scale, **options)
+            self._init_kde_kdepy(data_scaled, weights, bandwidth, kernel, backend, boundary, nrep, scale, pdf_scale, **options)
 
         ldict = locals()
         for key in ['data', 'weights', 'boundary', 'backend', 'kernel', 'bandwidth',
@@ -258,19 +258,29 @@ class KDE:
 
         self.kde = KernelDensity(kernel=kernel, bandwidth=bw_normed, **options).fit(data_scaled, sample_weight=weights)
 
-    def _init_kde_kdepy(self, data_scaled, weights, bandwidth, kernel, backend, boundary, scale, **options):
+    def _init_kde_kdepy(self, data_scaled, weights, bandwidth, kernel, backend, boundary, nrep, scale, pdf_scale, **options):
         kernel = kernel_kdepy_dict[kernel]
 
         grids = options.get('grids', None)
+        log = options.setdefault('log', False)
         if grids is not None and hasattr(grids, '__len__') and not np.isscalar(grids[0]):
             grids = boundary_reflex_grid(grids, boundary)
             options['grids'] = [g / s for g, s in zip(grids, scale)]  # scale the grids
 
-        self.kde = kdepy_grid(data_scaled, weights=weights, kernel=kernel, bw=bandwidth, backend=backend, **options)
+        x_grid, y_grid = kdepy_grid(data_scaled, weights=weights, kernel=kernel, bw=bandwidth, 
+                                    backend=backend, return_grid=True, **options)
+        x_grid = [g * s for g, s in zip(x_grid, scale)]
 
-    def _pdf_scipy(self, data, log=False, scaled=False):
-        if scaled:
-            raise ValueError('input data is not supposed to be scaled')
+        if log:
+            fill_value = -np.inf
+            y_grid = np.log(nrep / pdf_scale) + y_grid
+        else:
+            y_grid = nrep / pdf_scale * y_grid
+            fill_value = 0
+        self.kde = EqualGridInterpolator(x_grid, y_grid, padding='constant', fill_value=fill_value)
+        self.kde.log = bool(log)
+
+    def _pdf_scipy(self, data, log=False):
         p = self.nrep * self.kde.pdf(data.T)
 
         if log:
@@ -278,63 +288,50 @@ class KDE:
         else:
             return p
 
-    def _pdf_sklearn(self, data, log=False, scaled=False):
-        if not scaled:
-            data = data / self.scale
-
+    def _pdf_sklearn(self, data, log=False):
         factor = self.nrep / self.pdf_scale
-        lnp = self.kde.score_samples(data)
+        lnp = np.log(factor) + self.kde.score_samples(data / self.scale)
 
         if log:
-            return np.log(factor) + lnp
+            return lnp
         else:
-            return factor * np.exp(lnp)
+            return np.exp(lnp)
 
-    def _pdf_kdepy(self, data, log=False, scaled=False):
-        if not scaled:
-            data = data / self.scale
-
-        factor = self.nrep / self.pdf_scale
-
+    def _pdf_kdepy(self, data, log=False):
         if log:
             if self.kde.log:
-                return np.log(factor) + self.kde(data.T)
+                return self.kde(data.T)
             else:
-                return np.log(factor) + np.log(self.kde(data.T))
+                return np.log(self.kde(data.T))
         else:
             if self.kde.log:
-                return factor * np.exp(self.kde(data.T))
+                return np.exp(self.kde(data.T))
             else:
-                return factor * self.kde(data.T)
+                return self.kde(data.T)
 
     def __call__(self, data, log=False):
-        return self.pdf(data, log=log, scaled=False)
+        return self.pdf(data, log=log)
 
-    def pdf(self, data, log=False, scaled=False):
+    def pdf(self, data, log=False):
         """
         data: shape (n, d)
         log: bool
             If return p or lnp.
-        scaled: bool
-            Option for autopdf only.
         """
         if self.backend == 'scipy':
-            return self._pdf_scipy(data, log=log, scaled=scaled)
+            return self._pdf_scipy(data, log=log)
 
         elif self.backend == 'sklearn':
-            return self._pdf_sklearn(data, log=log, scaled=scaled)
+            return self._pdf_sklearn(data, log=log)
 
         elif self.backend == 'KDEpy.FFTKDE' or self.backend == 'KDEpy.TreeKDE':
-            return self._pdf_kdepy(data, log=log, scaled=scaled)
+            return self._pdf_kdepy(data, log=log)
 
     def autopdf(self, log=False):
         """
         Calculate the pdf of the underlying data points.
         """
-        if self.backend == 'scipy':
-            return self.pdf(self.data[:self.n], log=log, scaled=False)
-        else:
-            return self.pdf(self.data_scaled[:self.n], log=log, scaled=True)
+        return self.pdf(self.data[:self.n], log=log)
 
 
 def unfold_grid(x_fold):
@@ -351,7 +348,7 @@ def unfold_grid(x_fold):
 
 
 def kdepy_grid(X, weights=None, grids=200, kernel='gaussian', bw=1, grids_tol=3,
-               log=False, backend='KDEpy.FFTKDE'):
+               log=False, backend='KDEpy.FFTKDE', return_grid=False):
     """
     X: array
     weights: array
@@ -425,13 +422,18 @@ def kdepy_grid(X, weights=None, grids=200, kernel='gaussian', bw=1, grids_tol=3,
 
     if log:
         y_grid = np.log(y_grid)
-        fill_value = -np.inf
-    else:
-        fill_value = 0
 
-    interp = EqualGridInterpolator(x_grid, y_grid, padding='constant', fill_value=fill_value)
-    interp.log = bool(log)
-    return interp
+    if return_grid:
+        return x_grid, y_grid
+    else:
+        if log:
+            fill_value = -np.inf
+        else:
+            fill_value = 0
+
+        interp = EqualGridInterpolator(x_grid, y_grid, padding='constant', fill_value=fill_value)
+        interp.log = bool(log)
+        return interp
 
 
 # -----------------------------
