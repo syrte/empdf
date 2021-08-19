@@ -280,18 +280,33 @@ class KDE:
             return p
 
     def _pdf_sklearn(self, data, log=False, scaled=False):
-        if scaled:
-            lnp = self.kde.score_samples(data)
-        else:
-            lnp = self.kde.score_samples(data / self.scale)
+        if not scaled:
+            data = data / self.scale
+
+        factor = self.nrep / self.pdf_scale
+        lnp = self.kde.score_samples(data)
 
         if log:
-            return np.log(self.nrep / self.pdf_scale) + lnp
+            return np.log(factor) + lnp
         else:
-            return (self.nrep / self.pdf_scale) * np.exp(lnp)
+            return factor * np.exp(lnp)
 
     def _pdf_kdepy(self, data, log=False, scaled=False):
-        raise NotImplementedError
+        if not scaled:
+            data = data / self.scale
+
+        factor = self.nrep / self.pdf_scale
+
+        if log:
+            if self.kde.log:
+                return np.log(factor) + self.kde(data.T)
+            else:
+                return np.log(factor) + np.log(self.kde(data.T))
+        else:
+            if self.kde.log:
+                return factor * np.exp(self.kde(data.T))
+            else:
+                return factor * self.kde(data.T)
 
     def __call__(self, data, log=False):
         return self.pdf(data, log=log, scaled=False)
@@ -402,9 +417,14 @@ def kdepy_grid(X, weights=None, bins=100, kernel='gaussian', bw=1, log=False, ba
         y_grid = yy.reshape(*nbin)
 
     if log:
-        return EqualGridInterpolator(x_grid, np.log(y_grid), padding='constant', fill_value=0)
+        y_grid = np.log(y_grid)
+        fill_value = -np.inf
     else:
-        return EqualGridInterpolator(x_grid, y_grid, padding='constant', fill_value=0)
+        fill_value = 0
+
+    interp = EqualGridInterpolator(x_grid, y_grid, padding='constant', fill_value=fill_value)
+    interp.log = bool(log)
+    return interp
 
 
 # -----------------------------
