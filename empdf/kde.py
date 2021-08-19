@@ -10,6 +10,7 @@ For very large dataset, FFTKDE might be useful, not implemented yet. Check trial
 
 import numpy as np
 from itertools import product as iter_product
+from handy import EqualGridInterpolator
 
 
 def compute_neff(weights, normed=False):
@@ -35,7 +36,7 @@ def scotts_factor(neff, d):
     return neff**(-1. / (d + 4))
 
 
-def MADN(x, axis=None, keepdims=False):
+def MADN(x, weights=None, axis=None, keepdims=False):
     """
     The normalized median absolute deviation (MADN),
     a robust measure of scale that is more robust than IQR.
@@ -45,8 +46,14 @@ def MADN(x, axis=None, keepdims=False):
     which is only available for scipy>=1.5.0
     """
     scale = 0.6744897501960817  # special.ndtri(0.75)
-    med = np.median(x, axis=axis, keepdims=True)
-    return np.median(np.abs(x - med), axis=axis, keepdims=keepdims) / scale
+    if weights is None:
+        med = np.median(x, axis=axis, keepdims=True)
+        madn = np.median(np.abs(x - med), axis=axis, keepdims=keepdims) / scale
+    else:
+        raise NotImplementedError
+        # see https://gist.github.com/tinybike/d9ff1dad515b66cc0d87
+        # what if any(weights > 0.5*sum(weights))? => zero madn!!!
+    return madn
 
 
 def boundary_reflex(x, boundary=None, c_contiguous=False):
@@ -98,15 +105,56 @@ def boundary_reflex(x, boundary=None, c_contiguous=False):
     return out
 
 
+def boundary_reflex_grid(x, boundary=None):
+    """
+    helper function for FFTKDE
+    If not None, boundary must be in grid points.
+
+    >>> boundary_reflex_grid([np.linspace(0, 5, 6)])
+    (array([0., 1., 2., 3., 4., 5.]),)
+    >>> boundary_reflex_grid([np.linspace(0, 5, 6)], [[0, None]])
+    (array([-5., -4., -3., -2., -1.,  0.,  1.,  2.,  3.,  4.,  5.]),)
+    >>> boundary_reflex_grid([np.linspace(0, 5, 6), np.linspace(0, 2, 5)], [[0, 5], [0, None]])
+    (array([-5., -4., -3., -2., -1.,  0.,  1.,  2.,  3.,  4.,  5.,  6.,  7.,
+             8.,  9., 10.]),
+     array([-2. , -1.5, -1. , -0.5,  0. ,  0.5,  1. ,  1.5,  2. ]))    
+    """
+    if boundary is None:
+        out = x
+    else:
+        out = [[] for _ in range(len(x))]
+        for i, xi in enumerate(x):
+            out[i].append(xi)  # original
+            if boundary[i] is None:
+                continue
+            else:
+                for bound in boundary[i]:
+                    if bound is None:
+                        continue
+                    else:
+                        out[i].append(2 * bound - xi)  # reflected
+            out[i] = np.sort(np.unique(np.concatenate(out[i])))
+    return tuple(out)
+
+
 # See Table 6.2, Scott 2015
 # and https://scikit-learn.org/stable/modules/density.html
 kernel_var_dict = dict(
     tophat=1 / 3,
     linear=1 / 6,
     epanechnikov=1 / 5,
-    normal=1,
     gaussian=1,
-    cosine=1 - 8 / np.pi**2
+    cosine=1 - 8 / np.pi**2,
+    exponential=2,
+)
+
+kernel_kdepy_dict = dict(
+    tophap='box',
+    linear='tri',
+    epanechnikov='epa',
+    gaussian='gaussian',
+    cosine='cosine',
+    exponential='exponential',
 )
 
 
@@ -127,10 +175,7 @@ class KDE:
             If not None, reflex boundary correction is used for each axis.
         backend: ['scipy', 'sklearn', 'KDEpy.FFTKDE', 'KDEpy.TreeKDE']
             Backend to use.
-        kernel:
-            Supported kernels:
-            sklearn: epanechnikov, gaussian, cosine, linear, tophat
-            KDEpy: epa, gaussian, cosine, ...
+        kernel: ['tophat', 'linear', 'epanechnikov', 'gaussian', 'cosine', 'exponential']
             scipy backend always uses gaussian kernel, hence ignoring this option.
         options:
             See docs of corresponding backend.
@@ -145,7 +190,7 @@ class KDE:
         """
         n, d = data.shape
 
-        # calculate neff before reflex
+        # calculate neff and bandwidth
         if weights is None:
             neff = n
         else:
@@ -174,41 +219,82 @@ class KDE:
 
         # initialize KDE estimator
         if backend == 'scipy':
-            from scipy.stats import gaussian_kde
-
-            # initialize with the original n points for covariance matrix
-            # this modified _kde object is only designed for calling _kde.pdf and _kde.logpdf
-            if weights is None:
-                _kde = gaussian_kde(data[:n].T, bw_method=bandwidth)
-            else:
-                _kde = gaussian_kde(data[:n].T, bw_method=bandwidth, weights=weights[:n])
-
-            _kde.dataset = data.T
-            _kde.n = len(data)
-            if weights is None:
-                _kde._weights = np.ones(_kde.n) / _kde.n
-            else:
-                _kde._weights = weights / nrep  # normalized to 1
-
-            kernel = 'gaussian'
-
+            self._init_kde_scipy(data, weights, bandwidth, n, nrep, **options)
         elif backend == 'sklearn':
-            from sklearn.neighbors import KernelDensity
-
-            options.setdefault('rtol', 1e-6)
-            bw_normed = bandwidth / kernel_var_dict[kernel]**0.5  # normalize kernels to var = 1
-
-            _kde = KernelDensity(kernel=kernel, bandwidth=bw_normed, **options)
-            _kde.fit(data_scaled, sample_weight=weights)
-
+            self._init_kde_sklearn(data_scaled, weights, kernel, bandwidth, **options)
         elif backend == 'KDEpy.FFTKDE' or backend == 'KDEpy.TreeKDE':
-            raise NotImplementedError
+            self._init_kde_kdepy(data_scaled, weights, kernel, bandwidth, backend, **options)
 
         ldict = locals()
-        for key in ['_kde', 'data', 'weights', 'boundary', 'backend', 'kernel', 'bandwidth',
+        for key in ['data', 'weights', 'boundary', 'backend', 'kernel', 'bandwidth',
                     'n', 'd', 'nrep', 'scale', 'pdf_scale', 'data_scaled']:
             if key in ldict:
                 setattr(self, key, ldict[key])
+
+    def _init_kde_scipy(self, data, weights, bandwidth, n, nrep, **options):
+        from scipy.stats import gaussian_kde
+
+        # initialize with the original n points for covariance matrix
+        # this modified kde object is only designed for calling kde.pdf and kde.logpdf
+        if weights is None:
+            kde = gaussian_kde(data[:n].T, bw_method=bandwidth, **options)
+        else:
+            kde = gaussian_kde(data[:n].T, bw_method=bandwidth, weights=weights[:n], **options)
+
+        kde.dataset = data.T
+        kde.n = len(data)
+        if weights is None:
+            kde._weights = np.ones(kde.n) / kde.n
+        else:
+            kde._weights = weights / nrep  # normalized to 1
+        self.kde = kde
+
+    def _init_kde_sklearn(self, data_scaled, weights, kernel, bandwidth, **options):
+        from sklearn.neighbors import KernelDensity
+
+        options.setdefault('rtol', 1e-6)
+        bw_normed = bandwidth / kernel_var_dict[kernel]**0.5  # normalize kernels to var = 1
+
+        self.kde = KernelDensity(kernel=kernel, bandwidth=bw_normed, **options).fit(data_scaled, sample_weight=weights)
+
+    def _init_kde_kdepy(self, data_scaled, weights, kernel, bandwidth, backend, **options):
+        kernel = kernel_kdepy_dict[kernel]
+
+        grid = options.pop('grid_points', 100)
+        if grid is not None and hasattr(grid, '__len__') and not np.isscalar(grid[0]):
+            grid = boundary_reflex_grid(grid)
+            grid = [g / s for g, s in zip(grid, self.scale)]  # scale the grid
+
+        self.kde = kdepy_grid(
+            data_scaled, weights=weights, bins=grid,
+            kernel=kernel, bw=bandwidth, backend=backend, **options)
+
+    def _pdf_scipy(self, data, log=False, scaled=False):
+        if scaled:
+            raise ValueError('input data is not supposed to be scaled')
+        p = self.nrep * self.kde.pdf(data.T)
+
+        if log:
+            return np.log(p)
+        else:
+            return p
+
+    def _pdf_sklearn(self, data, log=False, scaled=False):
+        if scaled:
+            lnp = self.kde.score_samples(data)
+        else:
+            lnp = self.kde.score_samples(data / self.scale)
+
+        if log:
+            return np.log(self.nrep / self.pdf_scale) + lnp
+        else:
+            return (self.nrep / self.pdf_scale) * np.exp(lnp)
+
+    def _pdf_kdepy(self, data, log=False, scaled=False):
+        raise NotImplementedError
+
+    def __call__(self, data, log=False):
+        return self.pdf(data, log=log, scaled=False)
 
     def pdf(self, data, log=False, scaled=False):
         """
@@ -219,28 +305,13 @@ class KDE:
             Option for autopdf only.
         """
         if self.backend == 'scipy':
-            if scaled:
-                raise ValueError('input data is not supposed to be scaled')
-            p = self.nrep * self._kde.pdf(data.T)
-
-            if log:
-                return np.log(p)
-            else:
-                return p
+            return self._pdf_scipy(data, log=log, scaled=scaled)
 
         elif self.backend == 'sklearn':
-            if scaled:
-                lnp = self._kde.score_samples(data)
-            else:
-                lnp = self._kde.score_samples(data / self.scale)
-
-            if log:
-                return np.log(self.nrep / self.pdf_scale) + lnp
-            else:
-                return (self.nrep / self.pdf_scale) * np.exp(lnp)
+            return self._pdf_sklearn(data, log=log, scaled=scaled)
 
         elif self.backend == 'KDEpy.FFTKDE' or self.backend == 'KDEpy.TreeKDE':
-            raise NotImplementedError
+            return self._pdf_kdepy(data, log=log, scaled=scaled)
 
     def autopdf(self, log=False):
         """
@@ -252,6 +323,91 @@ class KDE:
             return self.pdf(self.data_scaled[:self.n], log=log, scaled=True)
 
 
+def unfold_grid(x_fold):
+    "function for kdepy_grid"
+    ndim = x_fold.shape[-1]
+
+    x_grid = [None] * ndim
+    for i in range(ndim):
+        ix = [0] * (ndim + 1)
+        ix[i] = slice(None)
+        ix[-1] = i
+        x_grid[i] = x_fold[tuple(ix)]
+    return tuple(x_grid)
+
+
+def kdepy_grid(X, weights=None, bins=100, kernel='gaussian', bw=1, log=False, backend='KDEpy.FFTKDE'):
+    """
+    X: array
+    weights: array
+        Data and weights
+    bins: int, tuple of int, tuple of array
+        A grid to evaluate on, must cover all data points.
+    kernel: str {'box', 'tri', 'epa', 'gaussian', 'cosine', 'exponential'}
+        The kernel function.
+    bw: float or str
+        Bandwidth.
+    log: bool
+        If true, log(prob) returned.
+    backend: ['FFTKDE', 'TreeKDE']
+
+    Example
+    -------
+    from scipy import stats
+
+    ndat = 1000
+    x = np.random.randn(ndat, 1)
+    s = ndat**-0.2
+    weights = np.ones(ndat)
+
+    y1 = kdepy_grid(x, weights, bins=100, bw=s)(x.T)
+    y2 = kdepy_grid(x, weights, bins=[np.linspace(-5, 5, 201)], bw=s)(x.T)
+    y3 = stats.gaussian_kde(x.T, s, weights)(x.T)
+
+    plt.scatter(x, y1, s=1)
+    plt.scatter(x, y2, s=1)
+    plt.scatter(x, y3, s=1)
+
+    xx = np.linspace(-4, 4, 500)
+    plt.plot(xx, stats.norm.pdf(xx), 'k--')
+
+    plt.yscale('log')
+    """
+
+    if X.ndim == 1:
+        X = X.reshape(-1, 1)
+        bins = [bins]
+    ndim = X.shape[-1]
+
+    if np.isscalar(bins):
+        bins = [bins] * ndim
+
+    import KDEpy
+    if backend == 'KDEpy.FFTKDE':
+        kde = KDEpy.FFTKDE(kernel=kernel, bw=bw).fit(X, weights)
+    elif backend == 'KDEpy.TreeKDE':
+        kde = KDEpy.TreeKDE(kernel=kernel, bw=bw).fit(X, weights)
+
+    if np.isscalar(bins[0]):
+        nbin = tuple(bins)
+        xx, yy = kde.evaluate(nbin)
+        x_fold = xx.reshape(*nbin, ndim)
+        x_grid = unfold_grid(x_fold)
+        y_grid = yy.reshape(*nbin)
+    else:
+        nbin = tuple([len(bin) for bin in bins])
+        x_grid = tuple(bins)
+        xx = np.stack(np.meshgrid(*x_grid, indexing='ij'), axis=-1).reshape(-1, ndim)
+        yy = kde.evaluate(xx)
+        y_grid = yy.reshape(*nbin)
+
+    if log:
+        return EqualGridInterpolator(x_grid, np.log(y_grid), padding='constant', fill_value=0)
+    else:
+        return EqualGridInterpolator(x_grid, y_grid, padding='constant', fill_value=0)
+
+
+# -----------------------------
 def test_compute_neff():
     assert compute_neff(np.ones(100)) == 100
     assert compute_neff(np.array([1, 1, 0])) == 2
