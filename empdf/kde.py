@@ -117,7 +117,7 @@ def boundary_reflex_grid(x, boundary=None):
     >>> boundary_reflex_grid([np.linspace(0, 5, 6), np.linspace(0, 2, 5)], [[0, 5], [0, None]])
     (array([-5., -4., -3., -2., -1.,  0.,  1.,  2.,  3.,  4.,  5.,  6.,  7.,
              8.,  9., 10.]),
-     array([-2. , -1.5, -1. , -0.5,  0. ,  0.5,  1. ,  1.5,  2. ]))    
+     array([-2. , -1.5, -1. , -0.5,  0. ,  0.5,  1. ,  1.5,  2. ]))
     """
     if boundary is None:
         out = x
@@ -179,6 +179,7 @@ class KDE:
             scipy backend always uses gaussian kernel, hence ignoring this option.
         options:
             See docs of corresponding backend.
+            KDEpy.FFTKDE, KDEpy.TreeKDE: 'grids'
 
         Examples
         --------
@@ -221,9 +222,9 @@ class KDE:
         if backend == 'scipy':
             self._init_kde_scipy(data, weights, bandwidth, n, nrep, **options)
         elif backend == 'sklearn':
-            self._init_kde_sklearn(data_scaled, weights, kernel, bandwidth, **options)
+            self._init_kde_sklearn(data_scaled, weights, bandwidth, kernel, **options)
         elif backend == 'KDEpy.FFTKDE' or backend == 'KDEpy.TreeKDE':
-            self._init_kde_kdepy(data_scaled, weights, kernel, bandwidth, backend, **options)
+            self._init_kde_kdepy(data_scaled, weights, bandwidth, kernel, backend, boundary, scale, **options)
 
         ldict = locals()
         for key in ['data', 'weights', 'boundary', 'backend', 'kernel', 'bandwidth',
@@ -249,7 +250,7 @@ class KDE:
             kde._weights = weights / nrep  # normalized to 1
         self.kde = kde
 
-    def _init_kde_sklearn(self, data_scaled, weights, kernel, bandwidth, **options):
+    def _init_kde_sklearn(self, data_scaled, weights, bandwidth, kernel, **options):
         from sklearn.neighbors import KernelDensity
 
         options.setdefault('rtol', 1e-6)
@@ -257,13 +258,13 @@ class KDE:
 
         self.kde = KernelDensity(kernel=kernel, bandwidth=bw_normed, **options).fit(data_scaled, sample_weight=weights)
 
-    def _init_kde_kdepy(self, data_scaled, weights, kernel, bandwidth, backend, **options):
+    def _init_kde_kdepy(self, data_scaled, weights, bandwidth, kernel, backend, boundary, scale, **options):
         kernel = kernel_kdepy_dict[kernel]
 
-        grid = options.pop('grid_points', 100)
+        grid = options.pop('grids', 100)
         if grid is not None and hasattr(grid, '__len__') and not np.isscalar(grid[0]):
-            grid = boundary_reflex_grid(grid)
-            grid = [g / s for g, s in zip(grid, self.scale)]  # scale the grid
+            grid = boundary_reflex_grid(grid, boundary)
+            grid = [g / s for g, s in zip(grid, scale)]  # scale the grid
 
         self.kde = kdepy_grid(
             data_scaled, weights=weights, bins=grid,
