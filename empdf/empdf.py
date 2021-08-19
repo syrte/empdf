@@ -72,8 +72,11 @@ options_default = dict(
     N_RBIN_R=50,
     N_VBIN_R=50,   # quadrature grids for rho(r)
     N_CBIN_R=50,   # quadrature grids for rho(r)
-    KDE_opt={},    # KDE options for N_Ej2
+    KDE_OPT=dict(),    # KDE options for N_Ej2
 )
+# kde_opt: e.g., 
+# dict(backend='sklearn', bw_factor=1, kernel='epanechnikov')
+# dict(backend='KDEpy.FFTKDE', bw_factor=1, kernel='epanechnikov', grids=100, grids_tol=2)
 
 
 options = dict()
@@ -387,12 +390,9 @@ class Tracer:
         bincount = integrator.count_raidal_bin(rbin)
         return bincount
 
-    def build_N_Ej2(self, **kde_opt):
+    def build_N_Ej2(self):
         """
         Should be executed after integrate(set_wobs=True)
-
-        kde_opt:
-            e.g., backend='sklearn', bw_factor=1, kernel='epanechnikov'
         """
         data = np.stack([self.E, self.j2], axis=-1)  # nx2
 
@@ -404,6 +404,7 @@ class Tracer:
         # boundary = [[self.Emin, None], [0, 1]]
         boundary = [None, [0, 1]]  # no boundary constraints for Energy
 
+        kde_opt = options['KDE_OPT']
         self.N_Ej2_interp = KDE(data, weights=weights, boundary=boundary, **kde_opt)
 
     def build_f_Ej2(self):
