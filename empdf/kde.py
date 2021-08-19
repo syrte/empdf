@@ -261,14 +261,12 @@ class KDE:
     def _init_kde_kdepy(self, data_scaled, weights, bandwidth, kernel, backend, boundary, scale, **options):
         kernel = kernel_kdepy_dict[kernel]
 
-        grid = options.pop('grids', 100)
-        if grid is not None and hasattr(grid, '__len__') and not np.isscalar(grid[0]):
-            grid = boundary_reflex_grid(grid, boundary)
-            grid = [g / s for g, s in zip(grid, scale)]  # scale the grid
+        grids = options.get('grids', None)
+        if grids is not None and hasattr(grids, '__len__') and not np.isscalar(grids[0]):
+            grids = boundary_reflex_grid(grids, boundary)
+            options['grids'] = [g / s for g, s in zip(grids, scale)]  # scale the grids
 
-        self.kde = kdepy_grid(
-            data_scaled, weights=weights, bins=grid,
-            kernel=kernel, bw=bandwidth, backend=backend, **options)
+        self.kde = kdepy_grid(data_scaled, weights=weights, kernel=kernel, bw=bandwidth, backend=backend, **options)
 
     def _pdf_scipy(self, data, log=False, scaled=False):
         if scaled:
@@ -352,17 +350,20 @@ def unfold_grid(x_fold):
     return tuple(x_grid)
 
 
-def kdepy_grid(X, weights=None, bins=100, kernel='gaussian', bw=1, log=False, backend='KDEpy.FFTKDE'):
+def kdepy_grid(X, weights=None, grids=200, kernel='gaussian', bw=1, grids_tol=3,
+               log=False, backend='KDEpy.FFTKDE'):
     """
     X: array
     weights: array
         Data and weights
-    bins: int, tuple of int, tuple of array
-        A grid to evaluate on, must cover all data points.
+    grids: int, tuple of int, tuple of array
+        Grids to evaluate on, must cover all data points.
     kernel: str {'box', 'tri', 'epa', 'gaussian', 'cosine', 'exponential'}
         The kernel function.
     bw: float or str
         Bandwidth.
+    grids_tol: float
+        Tolerance used for generating auto grids.
     log: bool
         If true, log(prob) returned.
     backend: ['FFTKDE', 'TreeKDE']
@@ -376,8 +377,8 @@ def kdepy_grid(X, weights=None, bins=100, kernel='gaussian', bw=1, log=False, ba
     s = ndat**-0.2
     weights = np.ones(ndat)
 
-    y1 = kdepy_grid(x, weights, bins=100, bw=s)(x.T)
-    y2 = kdepy_grid(x, weights, bins=[np.linspace(-5, 5, 201)], bw=s)(x.T)
+    y1 = kdepy_grid(x, weights, grids=100, bw=s)(x.T)
+    y2 = kdepy_grid(x, weights, grids=[np.linspace(-5, 5, 201)], bw=s)(x.T)
     y3 = stats.gaussian_kde(x.T, s, weights)(x.T)
 
     plt.scatter(x, y1, s=1)
@@ -392,11 +393,11 @@ def kdepy_grid(X, weights=None, bins=100, kernel='gaussian', bw=1, log=False, ba
 
     if X.ndim == 1:
         X = X.reshape(-1, 1)
-        bins = [bins]
+        grids = [grids]
     ndim = X.shape[-1]
 
-    if np.isscalar(bins):
-        bins = [bins] * ndim
+    if np.isscalar(grids):
+        grids = [grids] * ndim
 
     import KDEpy
     if backend == 'KDEpy.FFTKDE':
@@ -404,18 +405,23 @@ def kdepy_grid(X, weights=None, bins=100, kernel='gaussian', bw=1, log=False, ba
     elif backend == 'KDEpy.TreeKDE':
         kde = KDEpy.TreeKDE(kernel=kernel, bw=bw).fit(X, weights)
 
-    if np.isscalar(bins[0]):
-        nbin = tuple(bins)
-        xx, yy = kde.evaluate(nbin)
-        x_fold = xx.reshape(*nbin, ndim)
-        x_grid = unfold_grid(x_fold)
-        y_grid = yy.reshape(*nbin)
+    # if np.isscalar(grids[0]):
+    #     n_grid = tuple(grids)
+    #     xx, yy = kde.evaluate(n_grid)
+    #     x_fold = xx.reshape(*n_grid, ndim)
+    #     x_grid = unfold_grid(x_fold)
+    #     y_grid = yy.reshape(*n_grid)
+    if np.isscalar(grids[0]):
+        n_grid = grids
+        xmin, xmax = X.min(axis=0) - bw * grids_tol, X.max(axis=0) + bw * grids_tol
+        x_grid = tuple([np.linspace(xmin[i], xmax[i], n_grid[i]) for i in range(ndim)])
     else:
-        nbin = tuple([len(bin) for bin in bins])
-        x_grid = tuple(bins)
-        xx = np.stack(np.meshgrid(*x_grid, indexing='ij'), axis=-1).reshape(-1, ndim)
-        yy = kde.evaluate(xx)
-        y_grid = yy.reshape(*nbin)
+        n_grid = tuple([len(bin) for bin in grids])
+        x_grid = tuple(grids)
+
+    xx = np.stack(np.meshgrid(*x_grid, indexing='ij'), axis=-1).reshape(-1, ndim)
+    yy = kde.evaluate(xx)
+    y_grid = yy.reshape(*n_grid)
 
     if log:
         y_grid = np.log(y_grid)
