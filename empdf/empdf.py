@@ -56,32 +56,40 @@ def set_attrs(obj, var_dict, var_list=None):
             setattr(obj, key, var_dict[key])
 
 
-# -----------------------------------------------
-# TODO
-
 def set_opt(**args):
     "See options_default for available options"
     global options
+
+    # update quadrature coefficients
+    if 'N_VBIN_R' in args:
+        x1, w1 = roots_legendre(args['N_VBIN_R'])
+        x1 = 0.5 * x1 + 0.5  # x1 in [0, 1]
+        w1 = 0.5 * w1
+    if 'N_CBIN_R' in args:
+        x2, w2 = roots_legendre(args['N_CBIN_R'])
+        x2 = 0.5 * x2 + 0.5  # x2 in [0, 1]
+        w2 = 0.5 * w2
+    _option_vars.update(x1=x1, w1=w1, x2=x2, w2=w2)
     options.update(**args)
 
 
 options_default = dict(
-    N_RBIN_I=1001,
-    N_EBIN_I=100,  # interpolator for DF(E, j2)
-    N_JBIN_I=100,  # interpolator for DF(E, j2)
-    N_RBIN_R=50,
-    N_VBIN_R=50,   # quadrature grids for rho(r)
-    N_CBIN_R=50,   # quadrature grids for rho(r)
+    N_RBIN_I=501,  #
+    N_EBIN_I=200,  # interpolator for DF(E, j2)
+    N_JBIN_I=199,  # interpolator for DF(E, j2)
+    N_RBIN_R=101,  # grids for rho(r)
+    N_VBIN_R=99,   # quadrature grids for rho(r)
+    N_CBIN_R=98,   # quadrature grids for rho(r)
     KDE_OPT=dict(),    # KDE options for N_Ej2
 )
-# XXX: not implemented for N_xxxx_x
+
+options = dict()  # global options
+_option_vars = dict()  # variable associated with options
+set_opt(**options_default)
+
 # Example
 # set_opt(KDE_OPT=dict(backend='KDEpy.FFTKDE', bw_factor=1, kernel='epanechnikov', grids=300, grids_tol=2))
 # set_opt(KDE_OPT=dict(backend='sklearn', bw_factor=1, kernel='epanechnikov'))
-
-
-options = dict()
-set_opt(**options_default)
 
 
 # -----------------------------------------------
@@ -112,18 +120,15 @@ def make_grid(rmin, rmax, n, dr=None):
     r = np.hstack([rmin, rmin + 1e-2 * dr1, r[1:-1], rmax - 1e-2 * dr2, rmax])
     return r
 
+
 # -----------------------------------------------
-
-
 class PotUtility:
-    N_RBIN_I = 501
-
     def __init__(self, rmin, rmax, pot, mass=None):
         """
         pot: potential object with callable '.potential' and (optional) '.mass'
         """
         # r = np.linspace(rmin, rmax, self.N_RBIN_I)
-        r = make_grid(rmin, rmax, self.N_RBIN_I)
+        r = make_grid(rmin, rmax, options['N_RBIN_I'])
         U = pot(r)
         interp_pot = CubicSpline(r, U, extrapolate=True)
 
@@ -171,30 +176,19 @@ class PotUtility:
 
 
 class DFInterpolator:
-    N_EBIN_I = 201  # interpolator for DF(E, j2)
-    N_JBIN_I = 199  # interpolator for DF(E, j2)
-
-    N_RBIN_R = 101
-    N_VBIN_R = 100  # quadrature grids for rho(r)
-    N_CBIN_R = 99  # quadrature grids for rho(r)
-
-    x1, w1 = roots_legendre(N_VBIN_R)
-    x2, w2 = roots_legendre(N_CBIN_R)
-    x1 = 0.5 * x1 + 0.5  # x1 in [0, 1]
-    w1 = 0.5 * w1
-    x2 = 0.5 * x2 + 0.5  # x2 in [0, 1]
-    w2 = 0.5 * w2
-
-    # @classmethod
-    # def set_params(cls, N_RBIN_R):
-
     def __init__(self, Emin, Emax, pot_util, N_Ej2_interp, func_obs=None):
+        N_EBIN_I = options['N_EBIN_I']
+        N_JBIN_I = options['N_JBIN_I']
+        self._x1 = _option_vars['x1']
+        self._w1 = _option_vars['w1']
+        self._x2 = _option_vars['x2']
+        self._w2 = _option_vars['w2']
 
-        E = np.linspace(Emin, Emax, self.N_EBIN_I)
-        j2 = np.linspace(0, 1, self.N_JBIN_I)
+        E = np.linspace(Emin, Emax, N_EBIN_I)
+        j2 = np.linspace(0, 1, N_JBIN_I)
         L2_max, r_pin = pot_util.L2_max(E, return_r=True)
 
-        buffer = np.zeros((self.N_EBIN_I, self.N_JBIN_I), dtype=Particle_dtype)
+        buffer = np.zeros((N_EBIN_I, N_JBIN_I), dtype=Particle_dtype)
         buffer['r'] = r_pin.reshape(-1, 1)
         buffer['E'] = E.reshape(-1, 1)
         buffer['L2'] = L2_max.reshape(-1, 1) * j2
@@ -211,7 +205,7 @@ class DFInterpolator:
         if N_Ej2_interp.backend.startswith('KDEpy'):
             self.p_Ej2 = N_Ej2_interp.kde  # already interpolating grid
         else:
-            p_Ej2 = N_Ej2_interp(E_j2).reshape(self.N_EBIN_I, self.N_JBIN_I)
+            p_Ej2 = N_Ej2_interp(E_j2).reshape(N_EBIN_I, N_JBIN_I)
             self.p_Ej2 = EqualGridInterpolator([E, j2], p_Ej2)
 
         # we don't want to interpolate f_Ej2 directly, too sharp at center
@@ -242,22 +236,23 @@ class DFInterpolator:
         return self.f_Ej2([E, j2])
 
     def _prepare_pdf(self):
-        # r = np.linspace(self.rmin, self.rmax, self.N_RBIN_R).reshape(-1, 1, 1)
-        # r = make_grid(self.rmin, self.rmax, self.N_RBIN_R).reshape(-1, 1, 1)
-        r = np.logspace(np.log10(self.rmin), np.log10(self.rmax), self.N_RBIN_R).reshape(-1, 1, 1)
+        N_RBIN_R = options['N_RBIN_R']
+
+        # r = make_grid(self.rmin, self.rmax, N_RBIN_R).reshape(-1, 1, 1)
+        r = np.logspace(np.log10(self.rmin), np.log10(self.rmax), N_RBIN_R).reshape(-1, 1, 1)
         U = self.pot_util(r)
         vmax = (2 * (self.Emax - U))**0.5  # shape (nr, 1, 1)
 
-        v = self.x1.reshape(-1, 1) * vmax  # shape (nr, nv, 1)
-        dv = self.w1.reshape(-1, 1) * vmax
-        c = self.x2  # cos(theta), shape (nc)
-        dc = self.w2
+        v = self._x1.reshape(-1, 1) * vmax  # shape (nr, nv, 1)
+        dv = self._w1.reshape(-1, 1) * vmax
+        c = self._x2  # cos(theta), shape (nc)
+        dc = self._w2
 
         v2 = v**2
         E = U + 0.5 * v2
         L2 = r**2 * v2 * (1 - c**2)  # shape (nr, nv, nc)
         f = self.f_EL2(E, L2)  # shape (nr, nv, nc)
-        p_r = 4 * np.pi * (f * v2 * dv * dc).reshape(self.N_RBIN_R, -1).sum(-1)
+        p_r = 4 * np.pi * (f * v2 * dv * dc).reshape(N_RBIN_R, -1).sum(-1)
 
         r = r.reshape(-1)
         self.pdf_r = CubicSpline(r, p_r)
