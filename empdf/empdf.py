@@ -59,17 +59,19 @@ def set_attrs(obj, var_dict, var_list=None):
 def set_opt(**args):
     "See options_default for available options"
     global options
+    global _option_vars
 
     # update quadrature coefficients
     if 'N_VBIN_R' in args:
         x1, w1 = roots_legendre(args['N_VBIN_R'])
         x1 = 0.5 * x1 + 0.5  # x1 in [0, 1]
         w1 = 0.5 * w1
+        _option_vars.update(x1=x1, w1=w1)
     if 'N_CBIN_R' in args:
         x2, w2 = roots_legendre(args['N_CBIN_R'])
         x2 = 0.5 * x2 + 0.5  # x2 in [0, 1]
         w2 = 0.5 * w2
-    _option_vars.update(x1=x1, w1=w1, x2=x2, w2=w2)
+        _option_vars.update(x2=x2, w2=w2)
     options.update(**args)
 
 
@@ -598,12 +600,18 @@ def AndersonDarling_stat(x, axis=None):
     "Anderson Darling statistic"
     n = len(x)
     i = np.arange(n)
-    x = np.sort(x, axis=axis)
-    D = - n - np.mean((2 * i + 1) * np.log(x) + (2 * (n - i) - 1) * np.log(1 - x), axis=axis)
-    return D
+    x = np.sort(x, axis=axis).clip(1e-16, 1 - 1e-16)  # clip to avoid having log(0) below
+    AD = - n - np.mean((2 * i + 1) * np.log(x) + (2 * (n - i) - 1) * np.log(1 - x), axis=axis)
+    return AD
 
 
-def AndersonDarling_prob(x):
-    "Approximate pdf for AD statistic (esp. for n >= 5 and p > 1e-3), see Han et al. 2016"
+def AndersonDarling_pdf(lnAD):
+    "Approximate pdf for ln(AD) statistic (esp. for n >= 5 and p > 1e-3), see Han et al. 2016"
     w, m1, s1, m2, s2 = 0.569, -0.570, 0.511, 0.227, 0.569
-    return stats.norm(m1, s1).pdf(x) * w + stats.norm(m2, s2).pdf(x) * (1 - w)
+    return stats.norm(m1, s1).pdf(lnAD) * w + stats.norm(m2, s2).pdf(lnAD) * (1 - w)
+
+
+def AndersonDarling_sf(lnAD):
+    "Approximate pdf for ln(AD) statistic (esp. for n >= 5 and p > 1e-3), see Han et al. 2016"
+    w, m1, s1, m2, s2 = 0.569, -0.570, 0.511, 0.227, 0.569
+    return stats.norm(m1, s1).sf(lnAD) * w + stats.norm(m2, s2).sf(lnAD) * (1 - w)
