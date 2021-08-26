@@ -159,9 +159,7 @@ kernel_kdepy_dict = dict(
 
 
 class KDE:
-    N_BIN_FFT = 100
-
-    def __init__(self, data, weights=None, bw_factor=1, boundary=None,
+    def __init__(self, data, weights=None, scale='std', bw_factor=1, boundary=None,
                  backend='sklearn', kernel='epanechnikov', **options):
         """
         Parameters
@@ -169,8 +167,10 @@ class KDE:
         data: shape (n, d)
         weights: shape (n,)
             Data and weights.
+        scale: ['std', 'madn', d-tuple of float]
+            The scale of data.
         bw_factor:
-            bandwidth = Scott's rule * bw_factor for scaled data
+            bandwidth = Scott's rule * bw_factor * scale for each dimension.
         boundary: None or shape (d, 2)
             If not None, reflex boundary correction is used for each axis.
         backend: ['scipy', 'sklearn', 'KDEpy.FFTKDE', 'KDEpy.TreeKDE']
@@ -179,7 +179,7 @@ class KDE:
             scipy backend always uses gaussian kernel, hence ignoring this option.
         options:
             See docs of corresponding backend.
-            KDEpy.FFTKDE, KDEpy.TreeKDE: 'grids'
+            KDEpy.FFTKDE, KDEpy.TreeKDE: 'grids', 'grids_tol'
 
         Examples
         --------
@@ -212,9 +212,18 @@ class KDE:
         else:
             nrep = 1
 
-        # calculate scale; scipy has its own scale
+        # calculate scale with the original n points; scipy has its own scale
         if backend != 'scipy':
-            scale = MADN(data[:n], axis=0)  # use the original n points for scale
+            if isinstance(scale, str):
+                if scale == 'std':
+                    scale = np.std(data[:n], axis=0)
+                elif scale == 'madn':
+                    scale = MADN(data[:n], axis=0)
+                else:
+                    raise ValueError('invalid scale')
+            else:
+                assert len(scale) == d, 'invalid scale'
+
             pdf_scale = np.prod(scale)
             data_scaled = data / scale
 
