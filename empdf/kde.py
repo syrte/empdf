@@ -62,8 +62,10 @@ def robust_scale(data, scale='std', axis=0):
     elif scale == 'madn':
         scale = MADN(data, axis=axis)
     elif scale == 'huber':
-        import statsmodels.api as sm
-        scale = sm.robust.scale.huber(data, axis=axis)[1]
+        if not hasattr(robust_scale, 'huber'):
+            import statsmodels.api as sm
+            robust_scale.huber = sm.robust.scale.Huber(tol=1e-3)  # lazy load
+        scale = robust_scale.huber(data, axis=axis)[1]
     else:
         raise ValueError('invalid scale type')
     return scale
