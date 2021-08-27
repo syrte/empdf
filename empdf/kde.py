@@ -56,6 +56,19 @@ def MADN(x, weights=None, axis=None, keepdims=False):
     return madn
 
 
+def robust_scale(data, scale='std', axis=0):
+    if scale == 'std':
+        scale = np.std(data, axis=axis)
+    elif scale == 'madn':
+        scale = MADN(data, axis=axis)
+    elif scale == 'huber':
+        import statsmodels.api as sm
+        scale = sm.robust.scale.huber(data, axis=axis)[1]
+    else:
+        raise ValueError('invalid scale type')
+    return scale
+
+
 def boundary_reflex(x, boundary=None, c_contiguous=False):
     """
     Parameters
@@ -215,14 +228,9 @@ class KDE:
         # calculate scale with the original n points; scipy has its own scale
         if backend != 'scipy':
             if isinstance(scale, str):
-                if scale == 'std':
-                    scale = np.std(data[:n], axis=0)
-                elif scale == 'madn':
-                    scale = MADN(data[:n], axis=0)
-                else:
-                    raise ValueError('invalid scale')
+                scale = robust_scale(data[:n], scale=scale, axis=0)
             else:
-                assert len(scale) == d, 'invalid scale'
+                assert len(scale) == d, 'invalid scale shape'
 
             pdf_scale = np.prod(scale)
             data_scaled = data / scale
@@ -276,7 +284,7 @@ class KDE:
             grids = boundary_reflex_grid(grids, boundary)
             options['grids'] = [g / s for g, s in zip(grids, scale)]  # scale the grids
 
-        x_grid, y_grid = kdepy_grid(data_scaled, weights=weights, kernel=kernel, bw=bandwidth, 
+        x_grid, y_grid = kdepy_grid(data_scaled, weights=weights, kernel=kernel, bw=bandwidth,
                                     backend=backend, return_grid=True, **options)
         x_grid = [g * s for g, s in zip(x_grid, scale)]
 
