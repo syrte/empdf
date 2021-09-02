@@ -76,10 +76,10 @@ def set_opt(**args):
 
 
 options_default = dict(
-    N_RBIN_I=501,  #
+    N_RBIN_I=501,  # grids for phi(r)
     N_EBIN_I=200,  # interpolator for DF(E, j2)
     N_JBIN_I=199,  # interpolator for DF(E, j2)
-    N_RBIN_R=101,  # grids for rho(r)
+    N_RBIN_R=101,  # grids for n(r) and P(<r), used in obs selection correction
     N_VBIN_R=99,   # quadrature grids for rho(r)
     N_CBIN_R=98,   # quadrature grids for rho(r)
     KDE_OPT=dict(),    # KDE options for N_Ej2
@@ -556,7 +556,7 @@ class Estimator:
         rbin_old = getattr(self, '_opdf_rbin', None)
         if not np.array_equal(rbin, rbin_old):
             self._opdf_rbin = rbin  # caching
-            self._opdf_rcnt = np.histogram(self.tracer.rr, rbin)
+            self._opdf_rcnt = np.histogram(self.tracer.rr, rbin)[0]
         rcnt = self._opdf_rcnt
 
         # time average
@@ -578,7 +578,7 @@ class Estimator:
         self.tracer.update_config(pot, set_phase=True)
 
         phase_abs = np.abs(self.tracer.phase) * 2
-        return -AndersonDarling_stat(phase_abs)
+        return -AndersonDarling_stats(phase_abs)
 
     def stats_MeanPhase(self, pot=None):
         """
@@ -587,16 +587,16 @@ class Estimator:
         self.tracer.update_config(pot, set_phase=True)
 
         phase_abs = np.abs(self.tracer.phase) * 2
-        return -MeanPhase_stat(phase_abs)
+        return -MeanPhase_stats(phase_abs)
 
 
-def MeanPhase_stat(x):
+def MeanPhase_stats(x):
     "Normalized mean phase statistic"
     n = x.size
     return (np.mean(x, axis=1) - 0.5) * (12 * n)**0.5
 
 
-def AndersonDarling_stat(x, axis=None):
+def AndersonDarling_stats(x, axis=None):
     "Anderson Darling statistic"
     n = len(x)
     i = np.arange(n)
