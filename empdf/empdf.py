@@ -578,7 +578,8 @@ class Estimator:
         self.tracer.update_config(pot, set_phase=True)
 
         phase_abs = np.abs(self.tracer.phase) * 2
-        return -AndersonDarling_stats(phase_abs)
+        AD = AndersonDarling_stats(phase_abs)
+        return -AD
 
     def stats_MeanPhase(self, pot=None):
         """
@@ -587,13 +588,25 @@ class Estimator:
         self.tracer.update_config(pot, set_phase=True)
 
         phase_abs = np.abs(self.tracer.phase) * 2
-        return -MeanPhase_stats(phase_abs)
+        Theta2 = MeanPhase_stats(phase_abs)
+        return -Theta2
 
 
 def MeanPhase_stats(x):
-    "Normalized mean phase statistic"
+    "Normalized mean phase statistic, $\\bar\\Theta^2$"
     n = x.size
-    return (np.mean(x, axis=1) - 0.5) * (12 * n)**0.5
+    Theta2 = (np.mean(x) - 0.5)**2 * (12 * n)
+    return Theta2
+
+
+def MeanPhase_pdf(Theta2):
+    "Theta2 follows a chi2 distribution with dof=1"
+    return stats.chi2(1).pdf(Theta2)
+
+
+def MeanPhase_sf(Theta2):
+    "Theta2 follows a chi2 distribution with dof=1"
+    return stats.chi2(1).sf(Theta2)
 
 
 def AndersonDarling_stats(x, axis=None):
