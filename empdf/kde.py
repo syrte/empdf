@@ -36,7 +36,34 @@ def scotts_factor(neff, d):
     return neff**(-1. / (d + 4))
 
 
-def MADN(x, weights=None, axis=None, keepdims=False):
+def wstd(x, weights=None, axis=None, keepdims=False):
+    """
+    weighted std.
+
+    weights should have the same shape of x,
+    or the same ndim of x with shape matched at axis.
+
+    Examples
+    --------
+    a = np.random.randn(1000, 3)
+    w = np.ones((1000, 3))
+    wstd(a, axis=0) / wstd(a, weights=w, axis=0)
+    >>> array([1., 1., 1.])
+    """
+    if weights is None:
+        scale = np.std(x, axis=axis, keepdims=keepdims)
+    else:
+        if axis is None:
+            assert weights.shape == x.shape
+        else:
+            assert weights.shape[axis] == x.shape[axis]
+        w = weights / np.sum(weights, axis=axis, keepdims=True)
+        m = np.sum(x * w, axis=axis, keepdims=True)
+        scale = np.sum((x - m)**2 * w, axis=axis, keepdims=keepdims)**0.5
+    return scale
+
+
+def madn(x, weights=None, axis=None, keepdims=False):
     """
     The normalized median absolute deviation (MADN),
     a robust measure of scale that is more robust than IQR.
@@ -48,24 +75,38 @@ def MADN(x, weights=None, axis=None, keepdims=False):
     scale = 0.6744897501960817  # special.ndtri(0.75)
     if weights is None:
         med = np.median(x, axis=axis, keepdims=True)
-        madn = np.median(np.abs(x - med), axis=axis, keepdims=keepdims) / scale
+        scale = np.median(np.abs(x - med), axis=axis, keepdims=keepdims) / scale
     else:
         raise NotImplementedError
         # see https://gist.github.com/tinybike/d9ff1dad515b66cc0d87
         # what if any(weights > 0.5*sum(weights))? => zero madn!!!
-    return madn
+    return scale
 
 
-def robust_scale(data, scale='std', axis=0):
-    if scale == 'std':
-        scale = np.std(data, axis=axis)
-    elif scale == 'madn':
-        scale = MADN(data, axis=axis)
-    elif scale == 'huber':
-        if not hasattr(robust_scale, 'huber'):
+def huber(x, weights=None, axis=None):
+    if weights is None:
+        if not hasattr(huber, '_huber'):
             import statsmodels.api as sm
-            robust_scale.huber = sm.robust.scale.Huber(tol=1e-3)  # lazy load
-        scale = robust_scale.huber(data, axis=axis)[1]
+            huber._huber = sm.robust.scale.Huber(tol=1e-4)  # lazy load
+        scale = huber._huber(x, axis=axis)[1]
+    else:
+        raise NotImplementedError
+    return scale
+
+
+def robust_scale(data, weights=None, method='std'):
+    """
+    data: shape (n, d)
+    """
+    if weights is not None:
+        weights = weights.reshape(-1, 1)
+
+    if method == 'std':
+        scale = wstd(data, weights=weights, axis=0)
+    elif method == 'madn':
+        scale = madn(data, weights=weights, axis=0)
+    elif method == 'huber':
+        scale = huber(data, weights=weights, axis=0)
     else:
         raise ValueError('invalid scale type')
     return scale
@@ -230,7 +271,8 @@ class KDE:
         # calculate scale with the original n points; scipy has its own scale
         if backend != 'scipy':
             if isinstance(scale, str):
-                scale = robust_scale(data[:n], scale=scale, axis=0)
+                scale = robust_scale(data[:n], weights=None, method=scale)
+                # XXX, weights are ignored for scale
             else:
                 assert len(scale) == d, 'invalid scale shape'
 
