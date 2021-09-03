@@ -78,10 +78,12 @@ def set_opt(**args):
 options_default = dict(
     N_RBIN_I=501,  # grids for phi(r)
     N_EBIN_I=200,  # interpolator for DF(E, j2)
-    N_JBIN_I=199,  # interpolator for DF(E, j2)
+    N_JBIN_I=100,  # interpolator for DF(E, j2)
     N_RBIN_R=101,  # grids for n(r) and P(<r), used in obs selection correction
     N_VBIN_R=99,   # quadrature grids for rho(r)
-    N_CBIN_R=98,   # quadrature grids for rho(r)
+    N_CBIN_R=49,   # quadrature grids for rho(r)
+    EPSREL_RLIM=1e-6,  # relative precision of solving rmin and rmax
+    EPSREL_TINT=1e-6,  # relative precision of integrating Tr
     KDE_OPT=dict(),    # KDE options for N_Ej2
 )
 
@@ -196,8 +198,8 @@ class DFInterpolator:
         buffer['L2'] = L2_max.reshape(-1, 1) * j2
 
         pot_util.integrator.set_data(buffer.reshape(-1), pot_util.rmin, pot_util.rmax)
-        pot_util.integrator.solve_radial_limits()
-        pot_util.integrator.compute_radial_period(set_t=True, set_tcur=False, set_tobs=False)
+        pot_util.integrator.solve_radial_limits(epsrel=options['EPSREL_RLIM'])
+        pot_util.integrator.compute_radial_period(set_t=True, set_tcur=False, set_tobs=False, epsrel=options['EPSREL_TINT'])
 
         Tr = buffer['Tr'].copy() * 2  # note that buffer['Tr'] is only half
 
@@ -369,10 +371,10 @@ class Tracer:
         integrator.set_data(self.buffer, self.rmin, self.rmax)
 
         if set_rlim:
-            integrator.solve_radial_limits()
+            integrator.solve_radial_limits(epsrel=options['EPSREL_RLIM'])
 
         if set_Tr or set_phase or set_wobs:
-            integrator.compute_radial_period(set_t=set_Tr, set_tcur=set_phase, set_tobs=set_wobs)
+            integrator.compute_radial_period(set_t=set_Tr, set_tcur=set_phase, set_tobs=set_wobs, epsrel=options['EPSREL_TINT'])
 
             if set_Tr:
                 self.Tr = self.buffer['Tr'].copy()
@@ -572,7 +574,7 @@ class Estimator:
     def lnp_opdf_smooth(self, pot=None):
         raise NotImplementedError
 
-    def stats_AD(self, pot=None):
+    def stats_PhaseAD(self, pot=None):
         """
         Negative statistic returned for maximization procedure.
         """
@@ -582,7 +584,7 @@ class Estimator:
         AD = AndersonDarling_stats(phase_abs)
         return -AD
 
-    def stats_MeanPhase(self, pot=None):
+    def stats_PhaseMean(self, pot=None):
         """
         Negative statistic returned for maximization procedure.
         """
