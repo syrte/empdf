@@ -541,7 +541,7 @@ class Estimator:
         else:
             return lnp
 
-    def lnp_opdf(self, pot=None, rbin=None):
+    def lnp_opdf(self, pot=None, rbin=None, return_bin=False):
         """
         rbin: None, int, or 1D float array
             If None, log(ntracer) will be used.
@@ -562,14 +562,18 @@ class Estimator:
         rcnt = self._opdf_rcnt
 
         # time average
-        bincount = self.tracer.count_raidal_bin(rbin)
-        bincount /= np.sum(bincount)
-        pbin = bincount / bincount.sum()
+        rcnt_avg = self.tracer.count_raidal_bin(rbin)
 
         # log probability
+        # pbin = rcnt_avg / rcnt_avg.sum()
         # lnp = stats.multinomial.logpmf(rcnt, n=self.ntracer, p=pbin)
-        lnp = (np.log(pbin) * rcnt).sum()
-        return lnp
+
+        lnp = (np.log(rcnt_avg) * rcnt).sum()
+
+        if return_bin:
+            return lnp, rbin, rcnt, rcnt_avg
+        else:
+            return lnp
 
     def lnp_opdf_smooth(self, pot=None):
         raise NotImplementedError
