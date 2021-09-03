@@ -565,7 +565,8 @@ class Estimator:
         pbin = bincount / bincount.sum()
 
         # log probability
-        lnp = stats.multinomial.logpmf(rcnt, n=self.ntracer, p=pbin)
+        # lnp = stats.multinomial.logpmf(rcnt, n=self.ntracer, p=pbin)
+        lnp = (np.log(pbin) * rcnt).sum()
         return lnp
 
     def lnp_opdf_smooth(self, pot=None):
