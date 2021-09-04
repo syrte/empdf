@@ -28,8 +28,11 @@ def _gaussian_acquisition_wrapper(
         if X.ndim != 2:
             raise ValueError("X is {}-dimensional, however,"
                              " it must be 2-dimensional.".format(X.ndim))
+        if acq_func_kwargs is None:
+            acq_func_kwargs = dict()
+        gamma = acq_func_kwargs.get("gamma", 1)
 
-        func_and_grad = gaussian_ev(X, model, y_opt, return_grad)
+        func_and_grad = gaussian_ev(X, model, y_opt, gamma, return_grad)
 
         if return_grad:
             return -func_and_grad[0], -func_and_grad[1]  # reverse for minimization
@@ -80,23 +83,49 @@ def gaussian_ev(X, model, y_opt, return_grad=False):
             mu, std, mu_grad, std_grad = model.predict(
                 X, return_std=True, return_mean_grad=True,
                 return_std_grad=True)
-            mu = y_opt - mu  # note y=-lnL
+            mu = y_opt - mu    # note y=-lnL
+            mu_grad = -mu_grad
+            std = std + 1e-16  # prevent -inf from log(var)
 
-            expvar = np.exp(std**2)
-            ev = np.exp(2 * mu) * expvar * (expvar - 1)
-            ev_grad = 2 * ev * mu_grad + 4 * np.exp(2 * mu) * expvar * (expvar - 0.5) * std * std_grad
+            var = std**2
+            ev = 2 * mu + var + logexpm1(var)  # log variance of lognormal
+            ev_grad = 2 * mu_grad + 2 * (1 + expexpm1(var)) * std * std_grad
+
+            # expvar = np.exp(var)
+            # ev = np.exp(2 * mu) * expvar * (expvar - 1)
+            # ev_grad = 2 * ev * mu_grad + 4 * np.exp(2 * mu) * expvar * (expvar - 0.5) * std * std_grad
             # wolframalpha: D[E^(2 x + y^2) (E^y^2 - 1), y]
 
+            if not np.isfinite(ev).all() or not np.isfinite(ev_grad).all():
+                print(y_opt, mu, std, ev, ev_grad)
+                raise ValueError
             return ev, ev_grad
 
         else:
             mu, std = model.predict(X, return_std=True)
-            mu = y_opt - mu  # note y=-lnL
+            mu = y_opt - mu    # note y=-lnL
+            std = std + 1e-16  # prevent -inf from log(var)
 
-            expvar = np.exp(std**2)
-            ev = np.exp(2 * mu) * expvar * (expvar - 1)
+            var = std**2
+            ev = 2 * mu + var + logexpm1(var)  # log variance of lognormal
 
+            # expvar = np.exp(var)
+            # ev = np.exp(2 * mu) * expvar * (expvar - 1)
+
+            if not np.isfinite(ev).all():
+                print(y_opt, mu, std, ev)
+                raise ValueError
             return ev
+
+
+def logexpm1(x):
+    "robust log(exp(x)-1)"
+    return np.where(x < 37, np.log(np.expm1(x)), x)
+
+
+def expexpm1(x):
+    "robust exp(x)/(exp(x)-1), differential of logexpm1"
+    return np.where(x < 37, np.exp(x) / (np.expm1(x)), 1)
 
 
 skopt.acquisition._gaussian_acquisition = _gaussian_acquisition_wrapper
