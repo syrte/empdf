@@ -84,7 +84,7 @@ options_default = dict(
     N_CBIN_R=49,   # quadrature grids for rho(r)
     EPSREL_RLIM=1e-6,  # relative precision of solving rmin and rmax
     EPSREL_TINT=1e-6,  # relative precision of integrating Tr
-    KDE_OPT=dict(),    # KDE options for N_Ej2
+    KDE_OPT=dict(),    # KDE options for N_Ej2, XXX should use KDEpy as default!
 )
 
 options = dict()  # global options
@@ -580,23 +580,23 @@ class Estimator:
 
     def stats_PhaseAD(self, pot=None):
         """
-        Negative statistic returned for maximization procedure.
+        should be minimized!
         """
         self.tracer.update_config(pot, set_phase=True)
 
         phase_abs = np.abs(self.tracer.phase) * 2
         AD = AndersonDarling_stats(phase_abs)
-        return -AD
+        return AD
 
     def stats_PhaseMean(self, pot=None):
         """
-        Negative statistic returned for maximization procedure.
+        should be minimized!
         """
         self.tracer.update_config(pot, set_phase=True)
 
         phase_abs = np.abs(self.tracer.phase) * 2
         Theta2 = MeanPhase_stats(phase_abs)
-        return -Theta2
+        return Theta2
 
 
 def MeanPhase_stats(x):
@@ -617,7 +617,7 @@ def MeanPhase_sf(Theta2):
 
 
 def AndersonDarling_stats(x, axis=None):
-    "Anderson Darling statistic"
+    "Anderson-Darling statistic"
     n = len(x)
     i = np.arange(n)
     x = np.sort(x, axis=axis).clip(1e-16, 1 - 1e-16)  # clip to avoid having log(0) below
