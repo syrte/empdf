@@ -82,14 +82,17 @@ class NFWProf:
         "enclosed mean density"
         return self.mass(r) / (4 * np.pi / 3 * r**3)
 
-    def to_agama(self):
+    def to_agama(self, type='potential', **kwargs):
         import agama
-        pot = agama.Potential(type='Spheroid',
-                              densityNorm=self.rhos,
-                              scaleRadius=self.rs,
-                              alpha=1, beta=3, gamma=1
-                              )
-        return pot
+
+        kwargs = dict(type='Spheroid',
+                      densityNorm=self.rhos, scaleRadius=self.rs,
+                      alpha=1, beta=3, gamma=1, **kwargs)
+
+        if type == 'potential':
+            return agama.Potential(**kwargs)
+        elif type == 'density':
+            return agama.Density(**kwargs)
 
 
 class PowProf:
