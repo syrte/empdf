@@ -546,7 +546,7 @@ class Estimator:
         rbin: None, int, or 1D float array
             If None, log(ntracer) will be used.
         """
-        self.tracer.update_config(pot, set_rlim=True)
+        self.tracer.update_config(pot, set_Tr=True)
 
         if rbin is None:
             rbin = max(round(np.log(self.tracer.n)), 2)
