@@ -1,5 +1,6 @@
 """
 Add exponentiated variance (EV) acquisition function to skopt.
+Import this module before using EV acquisition in skopt.Optimizer.
 
 Author:
     Zhaozhou Li (lizz.astro@gmail.com)
@@ -113,6 +114,39 @@ def expexpm1(x):
     return np.where(x < 37, np.exp(x) / (np.expm1(x)), 1)
 
 
+def make_approx_lnprob(res):
+    """
+    Return the Gaussian process approximate probability function
+    that can be used later for sampling method.
+
+    XXX: not tested yet
+
+    Parameters
+    ----------
+    res: OptimizeResult 
+        An skopt.Optimizer result using EV acquisition for -lnprob.
+
+    Returns
+    -------
+    lnprob: callable
+        Approximate function.
+    """
+    gp = res.models[-1]
+
+    def lnprob(x):
+        "x: scalar, array (#dim) or (#sample, #dim)"
+        x = np.asarray(x)
+        lnp = -gp.predict(np.atleast_2d(x))
+
+        if x.ndim == 2:
+            return lnp
+        else:
+            return np.squeeze(lnp)
+
+    return lnprob
+
+
+# hooking
 skopt.acquisition._gaussian_acquisition = _gaussian_acquisition_wrapper
 skopt.optimizer.optimizer._gaussian_acquisition = _gaussian_acquisition_wrapper
 skopt.acquisition.gaussian_ev = gaussian_ev
