@@ -568,7 +568,8 @@ class Estimator:
         # pbin = rcnt_avg / rcnt_avg.sum()
         # lnp = stats.multinomial.logpmf(rcnt, n=self.ntracer, p=pbin)
 
-        lnp = (np.log(rcnt_avg) * rcnt).sum()
+        ix = rcnt > 0
+        lnp = (np.log(rcnt_avg[ix]) * rcnt[ix]).sum()
 
         if return_bin:
             return lnp, rbin, rcnt, rcnt_avg
