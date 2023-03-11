@@ -259,6 +259,7 @@ class DFInterpolator:
         p_r = 4 * np.pi * (f * v2 * dv * dc).reshape(N_RBIN_R, -1).sum(-1)
 
         r = r.reshape(-1)
+        p_r[np.isnan(p_r)] = 0  # XXX: known bug, may get nan in p_r when Emax < U(rmax), should use rmax close to the data range
         self.pdf_r = CubicSpline(r, p_r)
         self.cdf_r = CubicSpline(r, 4 * np.pi * p_r * r**2).antiderivative(1)
         # XXX, Normalized or not? do need cdf_r when having cdf_r_obs?
