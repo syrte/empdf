@@ -513,5 +513,5 @@ def test_MADN():
     from numpy.random import default_rng
     rng = default_rng(10)
     vals = rng.standard_normal(1000)
-    assert np.allclose(MADN(vals), 0.997429417584344)
-    assert MADN(np.arange(50) / 50) == 0.3706505546264005
+    assert np.allclose(madn(vals), 0.997429417584344)
+    assert madn(np.arange(50) / 50) == 0.3706505546264005
