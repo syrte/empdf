@@ -542,6 +542,30 @@ class Estimator:
         else:
             return lnp
 
+
+    def lnp_emdf_new(self, pot=None, func_obs=None):
+        if self.tracer.rlim_obs is None and self.tracer.func_obs is None:
+            set_wobs = False
+        else:
+            set_wobs = True
+
+        self.tracer.update_config(pot, func_obs, set_wobs=set_wobs)
+        if set_wobs:
+            wobs = self.tracer._wobs  # self.tracer.buffer['Tr'] / self.tracer.buffer['Tr_obs']
+            self.tracer._wobs = None
+        self.tracer.build_N_Ej2()
+
+        tracer = self.tracer
+        Tr, L2_max = tracer.Tr, tracer.L2_max
+        lnp_Ej2 = tracer.N_Ej2_interp.autopdf(log=True).sum()
+
+        lnp = lnp_Ej2 - np.log(Tr * L2_max).sum()
+
+        if set_wobs:
+            return lnp + np.log(wobs).sum()
+        else:
+            return lnp            
+
     def lnp_opdf(self, pot=None, rbin=None, return_bin=False):
         """
         rbin: None, int, or 1D float array
