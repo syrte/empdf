@@ -549,7 +549,7 @@ class Estimator:
         else:
             set_wobs = True
 
-        self.tracer.update_config(pot, func_obs, set_wobs=set_wobs)
+        self.tracer.update_config(pot, func_obs, set_Tr=True, set_wobs=set_wobs)
         if set_wobs:
             wobs = self.tracer._wobs  # self.tracer.buffer['Tr'] / self.tracer.buffer['Tr_obs']
             self.tracer._wobs = None
