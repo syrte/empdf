@@ -544,6 +544,7 @@ class Estimator:
 
 
     def lnp_emdf_new(self, pot=None, func_obs=None):
+        "This treatment is wrong in theory. Obsolete!"
         if self.tracer.rlim_obs is None and self.tracer.func_obs is None:
             set_wobs = False
         else:
